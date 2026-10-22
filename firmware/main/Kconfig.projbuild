@@ -1,0 +1,23 @@
+menu "RaceBox bridge"
+
+config RACEBOX_UDP_PORT
+    int "UDP port the JSON datagrams are broadcast to"
+    default 5005
+
+config RACEBOX_NAME_FILTER
+    string "Only connect to devices whose name contains this (e.g. serial number)"
+    default ""
+    help
+        Empty matches any device whose name starts with "RaceBox ".
+
+config RACEBOX_CPU_MIN_MHZ
+    int "Minimum CPU frequency for dynamic frequency scaling (MHz)"
+    default 80
+    help
+        One of 40, 80, 160, 240. The maximum is the default CPU frequency.
+
+config RACEBOX_CONFIG_WINDOW_S
+    int "Seconds after boot during which the BLE config service is advertised"
+    default 60
+
+endmenu

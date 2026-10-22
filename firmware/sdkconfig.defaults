@@ -1,0 +1,31 @@
+CONFIG_IDF_TARGET="esp32s3"
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# Console on the built-in USB-Serial/JTAG port
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# BLE: NimBLE host. Central to the RaceBox; peripheral for the config service.
+# The peripheral role is needed even without the config service: it brings in the
+# GATT server, and without it requests from the RaceBox (e.g. its MTU exchange)
+# are rejected and it never starts notifying.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=y
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
+# RaceBox (central) + one config client (peripheral)
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=2
+CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=247
+CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING=y
+# Pairing with the config client (LE Secure Connections, software ECDH) keeps the
+# host busy for a while; meanwhile RaceBox notifications keep arriving. The
+# default pools (12 msys blocks, 24 ACL buffers) run dry, which fails the pairing
+# and can stall the RaceBox link.
+CONFIG_BT_NIMBLE_MSYS_1_BLOCK_COUNT=48
+CONFIG_BT_NIMBLE_MSYS_2_BLOCK_COUNT=48
+CONFIG_BT_NIMBLE_TRANSPORT_ACL_FROM_LL_COUNT=48
+
+# Power management: dynamic frequency scaling between RACEBOX_CPU_MIN_MHZ and this
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y
+CONFIG_PM_ENABLE=y

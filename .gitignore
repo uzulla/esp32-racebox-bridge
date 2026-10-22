@@ -1,0 +1,5 @@
+firmware/build/
+firmware/sdkconfig
+firmware/sdkconfig.old
+firmware/test/host/build/
+client/racebox-dump
