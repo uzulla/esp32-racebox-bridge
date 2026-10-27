@@ -1,12 +1,29 @@
 # esp32-racebox
 
-RaceBox Mini --BLE--> ESP32-S3 --Wi-Fi UDP broadcast (JSON)--> racebox-dump (Go)
+RaceBox Mini --BLE--> ESP32-S3 / ESP32-C6 --Wi-Fi UDP broadcast (JSON)--> racebox-dump (Go)
 
 ## Firmware (`firmware/`, ESP-IDF v6.1)
+
+Targets: ESP32-S3 and ESP32-C6 (Waveshare ESP32-C6-GEEK checked: BLE link at 25 packets/s). They share
+`sdkconfig.defaults`, which does not set `CONFIG_IDF_TARGET`; the target comes from `IDF_TARGET`.
+Each target gets its own `build-<target>/` and `sdkconfig.<target>`.
+
+With [mise](https://mise.jdx.dev) (builds and flashes on the host that has ESP-IDF and the board, `wvx` by default):
+
+```sh
+mise run fw:flash                    # TARGET=esp32c6 by default
+TARGET=esp32s3 mise run fw:flash
+mise run ble:status                  # BLE config service, from this machine
+mise run ble:wifi-set
+mise run udp:dump                    # watch the UDP stream (-- -raw for JSON)
+```
+
+`BUILD_HOST`, `SERIAL_PORT` and `TARGET` can be overridden from the environment. Or by hand:
 
 ```sh
 . ~/esp/esp-idf-v6.1/export.sh
 cd firmware
+idf.py set-target esp32s3   # or esp32c6
 idf.py build
 idf.py -p /dev/ttyACM0 flash monitor
 idf.py menuconfig            # "RaceBox bridge": UDP port, device name filter, min CPU MHz

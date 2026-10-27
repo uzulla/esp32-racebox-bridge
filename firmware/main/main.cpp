@@ -1,4 +1,4 @@
-// RaceBox Mini (BLE) -> ESP32-S3 -> UDP broadcast (JSON) bridge.
+// RaceBox Mini (BLE) -> ESP32 -> UDP broadcast (JSON) bridge.
 
 #include <stdio.h>
 #include <string.h>

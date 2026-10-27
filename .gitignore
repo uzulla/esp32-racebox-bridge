@@ -1,5 +1,6 @@
-firmware/build/
+firmware/build*/
 firmware/sdkconfig
 firmware/sdkconfig.old
+firmware/sdkconfig.esp32*
 firmware/test/host/build/
 client/racebox-dump

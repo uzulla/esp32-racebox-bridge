@@ -1,0 +1,39 @@
+# Firmware is built and flashed on the host that has ESP-IDF and the board (default: wvx).
+#   mise run fw:build                  # TARGET=esp32c6 (default) or esp32s3
+#   TARGET=esp32s3 mise run fw:flash
+# Wi-Fi is configured over BLE from this machine.
+#   mise run ble:status
+#   mise run ble:wifi-set
+
+[env]
+TARGET = "{{ get_env(name='TARGET', default='esp32c6') }}"
+BUILD_HOST = "{{ get_env(name='BUILD_HOST', default='wvx') }}"
+IDF_EXPORT = "~/esp/esp-idf-v6.1/export.sh"
+SERIAL_PORT = "{{ get_env(name='SERIAL_PORT', default='/dev/ttyACM0') }}"
+
+[tasks."fw:sync"]
+description = "rsync firmware/ to $BUILD_HOST:racebox/"
+run = "rsync -a --delete --exclude 'build*' --exclude sdkconfig --exclude sdkconfig.old --exclude 'sdkconfig.esp32*' --exclude managed_components firmware/ $BUILD_HOST:racebox/"
+
+[tasks."fw:build"]
+description = "Build for $TARGET (esp32c6 | esp32s3) on $BUILD_HOST"
+depends = ["fw:sync"]
+run = "ssh $BUILD_HOST \". $IDF_EXPORT >/dev/null 2>&1; cd ~/racebox && IDF_TARGET=$TARGET idf.py -B build-$TARGET -DSDKCONFIG=sdkconfig.$TARGET build\""
+
+[tasks."fw:flash"]
+description = "Build and flash $TARGET to $SERIAL_PORT on $BUILD_HOST"
+depends = ["fw:sync"]
+run = "ssh $BUILD_HOST \". $IDF_EXPORT >/dev/null 2>&1; cd ~/racebox && IDF_TARGET=$TARGET idf.py -B build-$TARGET -DSDKCONFIG=sdkconfig.$TARGET -p $SERIAL_PORT build flash\""
+
+[tasks."ble:status"]
+description = "Show RaceBox link / Wi-Fi state of the bridge over BLE"
+run = "uv run tools/ble-config.py status"
+
+[tasks."ble:wifi-set"]
+description = "Set Wi-Fi SSID/password over BLE (prompts)"
+run = "uv run tools/ble-config.py wifi-set"
+
+[tasks."udp:dump"]
+description = "Show the UDP broadcast (summary per line); `mise run udp:dump -- -raw` for JSON"
+dir = "client"
+run = "go run . "
