@@ -25,6 +25,7 @@
 #include "nimble/nimble_port_freertos.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "bridge_status.h"
 #include "racebox.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
@@ -586,6 +587,53 @@ static racebox::UbxParser parser;
 static uint32_t dataPackets = 0;
 static uint32_t otherPackets = 0;
 
+// Snapshot for the frontend (the display, if this variant has one). Connection fields are refreshed on every
+// call; the RaceBox fields only when a data message is passed.
+static void publishStatus(const racebox::Data* d) {
+  static bridge::Status ds = {};
+  static int64_t apAt = 0;
+  ds.ble = static_cast<uint8_t>(bleState.load());
+  ds.configWindow = configWindowOpen;
+  snprintf(ds.device, sizeof(ds.device), "%s", ds.ble == 0 ? "" : targetName);
+  ds.wifiConfigured = wifiConfigured;
+  ds.wifiUp = broadcastAddr != 0;
+  ds.dataPackets = dataPackets;
+  ds.udpErrors = udpErrors;
+  const int64_t now = esp_timer_get_time();
+  if (now - apAt >= 1000000) {  // RSSI and IP change slowly
+    apAt = now;
+    wifi_ap_record_t ap;
+    ds.rssi = ds.wifiUp && esp_wifi_sta_get_ap_info(&ap) == ESP_OK ? ap.rssi : 0;
+    esp_netif_ip_info_t ip = {};
+    esp_netif_get_ip_info(esp_netif_get_handle_from_ifkey("WIFI_STA_DEF"), &ip);
+    snprintf(ds.ip, sizeof(ds.ip), IPSTR, IP2STR(&ip.ip));
+    snprintf(ds.ssid, sizeof(ds.ssid), "%s", wifiSsid);
+  }
+  if (d) {
+    const bool micro = strncmp(targetName, "RaceBox Micro", 13) == 0;
+    ds.dataAtUs = now;
+    ds.fix = d->fixStatus;
+    ds.fixOk = d->fixOk();
+    ds.sats = d->numSV;
+    ds.lat = d->lat;
+    ds.lon = d->lon;
+    ds.altMm = d->mslAlt;
+    ds.hAccMm = d->hAcc;
+    ds.speedMms = d->speed;
+    ds.headingE5 = d->heading;
+    ds.headingValid = d->headingValid();
+    ds.gX = d->gX;
+    ds.gY = d->gY;
+    ds.gZ = d->gZ;
+    ds.rotX = d->rotX;
+    ds.rotY = d->rotY;
+    ds.rotZ = d->rotZ;
+    ds.batteryPct = micro ? -1 : d->battery & 0x7F;
+    ds.charging = !micro && (d->battery & 0x80);
+  }
+  bridge::frontendUpdate(ds);
+}
+
 static void handlePacket() {
   static uint32_t seq = 0;
   if (parser.msgClass() != racebox::kDataClass || parser.msgId() != racebox::kDataId) {
@@ -595,6 +643,7 @@ static void handlePacket() {
   racebox::Data d;
   if (!racebox::decodeData(parser.payload(), parser.payloadLen(), d)) return;
   dataPackets++;
+  publishStatus(&d);
 
   // toJson() returns 0 rather than produce a datagram over the size cap.
   static char json[racebox::kMaxUdpPayload + 1];
@@ -643,6 +692,7 @@ static void dataTask(void*) {
     for (size_t i = 0; i < n; i++) {
       if (parser.feed(buf[i])) handlePacket();
     }
+    publishStatus(nullptr);
     const int64_t now = esp_timer_get_time();
     if (now - lastStatus >= 1000000) {
       lastStatus = now;
@@ -729,6 +779,7 @@ extern "C" void app_main() {
 
   initConsole();
   rxStream = xStreamBufferCreate(8192, 1);
+  bridge::frontendStart();
   initWifi();
   initBle();
 

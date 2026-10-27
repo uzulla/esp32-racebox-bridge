@@ -4,26 +4,40 @@ RaceBox Mini --BLE--> ESP32-S3 / ESP32-C6 --Wi-Fi UDP broadcast (JSON)--> racebo
 
 ## Firmware (`firmware/`, ESP-IDF v6.1)
 
-Targets: ESP32-S3 and ESP32-C6 (Waveshare ESP32-C6-GEEK checked: BLE link at 25 packets/s). They share
-`sdkconfig.defaults`, which does not set `CONFIG_IDF_TARGET`; the target comes from `IDF_TARGET`.
-Each target gets its own `build-<target>/` and `sdkconfig.<target>`.
+### Variants
+
+The bridge (`main/` + `components/racebox`) is the same everywhere. What differs is the *frontend*, an optional
+display that only receives a `bridge::Status` snapshot through `components/bridge_status/` (the bridge does not know
+which frontend exists). `frontends/<name>/frontend/` is added to the build by `-DRACEBOX_FRONTEND=<name>`:
+
+| VARIANT | IDF target | frontend | |
+|---|---|---|---|
+| `c6-geek` (default) | esp32c6 | `lcd` | Waveshare ESP32-C6-GEEK: status page + digital speedometer on its LCD (BOOT button switches pages) |
+| `c6` | esp32c6 | `none` | ESP32-C6 without a display |
+| `s3` | esp32s3 | `none` | ESP32-S3 without a display |
+
+A new board with a screen or LEDs = a new `frontends/<name>/frontend/` implementing `bridge::frontendStart()` and
+`bridge::frontendUpdate()`, plus a line in `tools/variant.sh`. Each variant has its own `build-<variant>/` and `sdkconfig.<variant>`.
+
+LCD pages: 1 = BLE / Wi-Fi / GPS fix / position / battery / G / speed; 2 = digital speedometer (large km/h,
+G bar, heading; shows 888 while there is no speed, i.e. no fix).
 
 With [mise](https://mise.jdx.dev) (builds and flashes on the host that has ESP-IDF and the board, `wvx` by default):
 
 ```sh
-mise run fw:flash                    # TARGET=esp32c6 by default
-TARGET=esp32s3 mise run fw:flash
+mise run fw:flash                    # VARIANT=c6-geek by default
+VARIANT=s3 mise run fw:flash
 mise run ble:status                  # BLE config service, from this machine
 mise run ble:wifi-set
 mise run udp:dump                    # watch the UDP stream (-- -raw for JSON)
 ```
 
-`BUILD_HOST`, `SERIAL_PORT` and `TARGET` can be overridden from the environment. Or by hand:
+`BUILD_HOST`, `SERIAL_PORT` and `VARIANT` can be overridden from the environment. Or by hand:
 
 ```sh
 . ~/esp/esp-idf-v6.1/export.sh
 cd firmware
-idf.py set-target esp32s3   # or esp32c6
+idf.py set-target esp32s3   # or esp32c6; add -DRACEBOX_FRONTEND=lcd for the C6-GEEK
 idf.py build
 idf.py -p /dev/ttyACM0 flash monitor
 idf.py menuconfig            # "RaceBox bridge": UDP port, device name filter, min CPU MHz
