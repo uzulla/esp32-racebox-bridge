@@ -23,6 +23,7 @@ struct Status {
 
   // Latest RaceBox data message; meaningful when dataAtUs != 0.
   int64_t dataAtUs;      // esp_timer_get_time() of the last message, 0 = none yet
+  int64_t unixUs;         // UTC of that message (microseconds since the Unix epoch), 0 = not valid
   uint8_t fix;           // 0 none, 2 2D, 3 3D
   bool fixOk;
   uint8_t sats;

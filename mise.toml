@@ -35,6 +35,13 @@ run = """
 ssh $BUILD_HOST ". $IDF_EXPORT >/dev/null 2>&1; cd ~/racebox && IDF_TARGET=$IDF_TARGET_NAME idf.py $IDF_ARGS -p $SERIAL_PORT build flash"
 """
 
+[tasks."fw:ap"]
+description = "Show the soft-AP SSID/password of the last $VARIANT build (new on every build)"
+run = """
+. tools/variant.sh
+ssh $BUILD_HOST "cat ~/racebox/build-$VARIANT/esp-idf/main/ap_credentials.h"
+"""
+
 [tasks."ble:status"]
 description = "Show RaceBox link / Wi-Fi state of the bridge over BLE"
 run = "uv run tools/ble-config.py status"

@@ -55,6 +55,14 @@ cmake -S test/host -B test/host/build && cmake --build test/host/build && test/h
 - Power: dynamic frequency scaling between 80 MHz and 160 MHz (`CONFIG_PM_ENABLE`).
 - Partition table keeps NVS at 0x9000 and has two OTA slots.
 
+### Soft AP
+
+The Wi-Fi runs as AP+STA. The STA joins the configured network (below); the AP `RCBXBRD-XXXXXX` lets a phone or PC
+connect directly when there is no router (IP 192.168.4.1, DHCP). While a station is connected the UDP datagrams are also
+broadcast to `192.168.4.255`. The SSID suffix and the WPA2 password are random and **change on every build**: they are
+generated into `build-<variant>/esp-idf/main/ap_credentials.h` (never committed) and logged at boot.
+`mise run fw:ap` shows the ones of the last build. The AP shares the radio with the STA, so it follows the STA's channel.
+
 ### Wi-Fi credentials
 
 Credentials are not in the source or the firmware image. They are saved to the ESP32's NVS

@@ -25,6 +25,7 @@
 #include "nimble/nimble_port_freertos.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "ap_credentials.h"  // generated per build, see CMakeLists.txt
 #include "bridge_status.h"
 #include "racebox.h"
 #include "services/gap/ble_svc_gap.h"
@@ -48,6 +49,9 @@ static std::atomic<uint32_t> droppedBytes{0};
 static int udpSock = -1;
 // Subnet broadcast address (network byte order); 0 while Wi-Fi is down.
 static std::atomic<uint32_t> broadcastAddr{0};
+// Same for the soft-AP subnet, and the number of stations joined to it.
+static uint32_t apBroadcastAddr = 0;
+static std::atomic<int> apClients{0};
 static std::atomic<uint32_t> udpErrors{0};
 static bool wifiConfigured = false;
 static char wifiSsid[33];  // configured SSID, "" if none
@@ -55,9 +59,7 @@ static char wifiSsid[33];  // configured SSID, "" if none
 // ---------------------------------------------------------------------------
 // UDP
 
-static void sendUdp(const char* buf, size_t len) {
-  const uint32_t addr = broadcastAddr;
-  if (!addr) return;
+static void sendUdpTo(uint32_t addr, const char* buf, size_t len) {
   sockaddr_in to = {};
   to.sin_family = AF_INET;
   to.sin_port = htons(CONFIG_RACEBOX_UDP_PORT);
@@ -66,6 +68,12 @@ static void sendUdp(const char* buf, size_t len) {
   if (sendto(udpSock, buf, len, MSG_DONTWAIT, reinterpret_cast<sockaddr*>(&to), sizeof(to)) < 0) {
     udpErrors++;
   }
+}
+
+// To the joined Wi-Fi network (STA) and, while someone is connected to our own AP, to the AP subnet.
+static void sendUdp(const char* buf, size_t len) {
+  if (const uint32_t addr = broadcastAddr) sendUdpTo(addr, buf, len);
+  if (apClients > 0 && apBroadcastAddr) sendUdpTo(apBroadcastAddr, buf, len);
 }
 
 // ---------------------------------------------------------------------------
@@ -120,8 +128,16 @@ static void applyWifiConfig() {
   esp_wifi_connect();
 }
 
+static void refreshApClients() {
+  wifi_sta_list_t list;
+  apClients = esp_wifi_ap_get_sta_list(&list) == ESP_OK ? list.num : 0;
+}
+
 static void onWifiEvent(void*, esp_event_base_t base, int32_t id, void* data) {
-  if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+  if (base == WIFI_EVENT && (id == WIFI_EVENT_AP_STACONNECTED || id == WIFI_EVENT_AP_STADISCONNECTED)) {
+    refreshApClients();
+    ESP_LOGI(TAG, "AP: %d station(s) connected", apClients.load());
+  } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
     broadcastAddr = 0;
     if (wifiConfigured) esp_wifi_connect();
   } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
@@ -137,6 +153,7 @@ static void initWifi() {
   ESP_ERROR_CHECK(esp_netif_init());
   ESP_ERROR_CHECK(esp_event_loop_create_default());
   esp_netif_create_default_wifi_sta();
+  esp_netif_t* apNetif = esp_netif_create_default_wifi_ap();
   wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
   ESP_ERROR_CHECK(esp_wifi_init(&init));
   // The credentials already live in our own NVS namespace; don't copy them.
@@ -145,8 +162,21 @@ static void initWifi() {
       esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, onWifiEvent, nullptr));
   ESP_ERROR_CHECK(
       esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, onWifiEvent, nullptr));
-  ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+  // AP + STA: the STA joins the configured network, the AP lets a phone or PC connect directly
+  // (no router at the track). The radio has one channel, so the AP follows the STA's channel.
+  ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
+  wifi_config_t ap = {};
+  strlcpy(reinterpret_cast<char*>(ap.ap.ssid), RACEBOX_AP_SSID, sizeof(ap.ap.ssid));
+  strlcpy(reinterpret_cast<char*>(ap.ap.password), RACEBOX_AP_PASSWORD, sizeof(ap.ap.password));
+  ap.ap.ssid_len = strlen(RACEBOX_AP_SSID);
+  ap.ap.channel = 1;
+  ap.ap.authmode = WIFI_AUTH_WPA2_PSK;
+  ap.ap.max_connection = 4;
+  ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap));
+  esp_netif_ip_info_t apIp = {};
+  if (esp_netif_get_ip_info(apNetif, &apIp) == ESP_OK) apBroadcastAddr = apIp.ip.addr | ~apIp.netmask.addr;
   ESP_ERROR_CHECK(esp_wifi_start());
+  ESP_LOGI(TAG, "AP \"%s\" password \"%s\" at " IPSTR, RACEBOX_AP_SSID, RACEBOX_AP_PASSWORD, IP2STR(&apIp.ip));
   applyWifiConfig();
 
   udpSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -612,6 +642,7 @@ static void publishStatus(const racebox::Data* d) {
   if (d) {
     const bool micro = strncmp(targetName, "RaceBox Micro", 13) == 0;
     ds.dataAtUs = now;
+    ds.unixUs = d->dateTimeValid() ? racebox::unixNanos(*d) / 1000 : 0;
     ds.fix = d->fixStatus;
     ds.fixOk = d->fixOk();
     ds.sats = d->numSV;

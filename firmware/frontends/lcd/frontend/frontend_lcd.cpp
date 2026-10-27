@@ -8,6 +8,7 @@
 #include "bridge_status.h"
 
 #include <math.h>
+#include <time.h>
 #include <algorithm>
 #include <stdio.h>
 #include <string.h>
@@ -159,8 +160,14 @@ void drawBattery(int x, int y, int pct, bool charging) {
   if (pct >= 0) fillRect(x + 2, y + 2, 15 * pct / 100, 7, c);
 }
 
-void drawPageDots(int y) {
-  for (int i = 0; i < kPages; i++) disc(W - 22 + i * 12, y, 3, i == page ? kCyan : kTrack);
+// Battery in the top-right corner of both pages: icon, then the percentage.
+void drawTopBattery(const Status& s, bool fresh) {
+  char b[16] = "--";
+  const bool known = fresh && s.batteryPct >= 0;
+  if (known) snprintf(b, sizeof(b), "%d%%", s.batteryPct);
+  const int x = W - 4 - textWidth(b, 1) - 3 - 21;
+  drawBattery(x, 3, known ? s.batteryPct : -1, s.charging);
+  text(x + 24, 5, b, 1, !known ? kDim : s.charging ? kCyan : kWhite);
 }
 
 // ---------------------------------------------------------------------------
@@ -174,7 +181,7 @@ void drawStatusPage(const Status& s, int rate, int64_t now) {
   fillRect(0, 18, W, 1, kCyan);
   text(6, 2, "RACEBOX", 2, kCyan);
   text(96, 2, "BRIDGE", 2, kDim);
-  drawPageDots(9);
+  drawTopBattery(s, fresh);
 
   auto label = [](int y, const char* t) { text(22, y, t, 2, kDim); };
   constexpr int kValX = 74;
@@ -247,29 +254,17 @@ void drawStatusPage(const Status& s, int rate, int64_t now) {
     text(kValX, y, "--", 2, kDim);
   }
 
-  // Battery, G, speed
+  // Date and time in JST (UTC+9, no DST), from the RaceBox clock; it keeps running between messages.
   y += 18;
-  drawBattery(2, y + 2, fresh ? s.batteryPct : -1, s.charging);
-  if (fresh && s.batteryPct >= 0) {
-    snprintf(b, sizeof(b), "%d%%", s.batteryPct);
-    text(26, y, b, 2, s.charging ? kCyan : kWhite);
+  if (s.unixUs) {
+    const time_t t = static_cast<time_t>((s.unixUs + (now - s.dataAtUs)) / 1000000) + 9 * 3600;
+    tm jst;
+    gmtime_r(&t, &jst);
+    snprintf(b, sizeof(b), "%04d-%02d-%02d %02d:%02d:%02d", jst.tm_year + 1900, jst.tm_mon + 1, jst.tm_mday,
+             jst.tm_hour, jst.tm_min, jst.tm_sec);
+    text((W - textWidth(b, 2)) / 2, y, b, 2, fresh ? kWhite : kDim);
   } else {
-    text(26, y, "--", 2, kDim);
-  }
-  if (fresh) {
-    if (dynMg >= 0) {
-      snprintf(b, sizeof(b), "%d.%02dG", dynMg / 1000, dynMg % 1000 / 10);
-      text(88, y, b, 2, kWhite);
-    } else {
-      text(88, y, "--", 2, kDim);
-    }
-    const int v = kmh10(s.speedMms);
-    snprintf(b, sizeof(b), "%d.%d", v / 10, v % 10);
-    const int xe = text(158, y, b, 2, kWhite);
-    text(xe + 2, y + 7, "KMH", 1, kDim);
-  } else {
-    text(88, y, "--", 2, kDim);
-    text(158, y, "--", 2, kDim);
+    text((W - textWidth("----------", 2)) / 2, y, "----------", 2, kDim);
   }
 }
 
@@ -284,7 +279,7 @@ void drawSpeedPage(const Status& s, int64_t now) {
   const int v10 = good ? kmh10(s.speedMms) : 8880;  // 888 = no speed available (no fix / no data)
   char b[16];
 
-  drawPageDots(9);
+  drawTopBattery(s, fresh);
 
   // G bar in the margin left of the digits, full height of the LCD: 0 at the bottom, kBarMaxMg at the top.
   constexpr int kBarX = 26, kBarW = 20, kBarY = 0, kBarH = H, kBarMaxMg = 1500;
