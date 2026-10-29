@@ -26,6 +26,7 @@
   dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
   .gbar { height: 10px; background: #0f1530; border-radius: 5px; overflow: hidden; margin: 10px 0 2px; }
   .gbar i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--green), #ffb000, var(--red)); }
+  #ball { display: block; width: 100%; max-width: 200px; aspect-ratio: 1; margin: 10px auto 4px; }
   .legend { display: flex; align-items: center; gap: 6px; color: var(--dim); font-size: 12px; margin-top: 14px; }
   .legend i { flex: 1; height: 8px; border-radius: 4px; background: linear-gradient(90deg, #3b6bff, #32e678, #ffd000, #ff4646); }
   footer { background: var(--panel); border-top: 1px solid var(--line); padding: 8px 12px; }
@@ -56,8 +57,11 @@
     <div id="speed">--<small>km/h</small></div>
     <div id="clock">--</div>
     <div class="gbar"><i id="gbar"></i></div>
+    <canvas id="ball" title="G ボール(円は 0.5G ごと、赤い円が 1G。上 = 加速)"></canvas>
     <dl>
+      <dt>走行距離</dt><dd id="dist">--</dd>
       <dt>G (重力除く)</dt><dd id="g">--</dd>
+      <dt>前後 / 左右</dt><dd id="fblr">--</dd>
       <dt>加速度 X / Y / Z</dt><dd id="acc">--</dd>
       <dt>方位</dt><dd id="hdg">--</dd>
       <dt>高度</dt><dd id="alt">--</dd>

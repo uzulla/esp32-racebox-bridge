@@ -36,6 +36,171 @@ function parseCsv(text) {
   return rows;
 }
 
+// ---- 走行距離 ----
+function haversine(lat1, lon1, lat2, lon2) {
+  const R = 6371008.8, r = Math.PI / 180;
+  const a = Math.sin((lat2 - lat1) * r / 2) ** 2 + Math.cos(lat1 * r) * Math.cos(lat2 * r) * Math.sin((lon2 - lon1) * r / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+// 速度(ドップラー)を時間で積分する。位置の差を足すと、静止中の GPS のゆらぎが距離として積もるため。
+// FIX が 1 秒より長く途切れた区間は、前後の有効な位置の直線距離で埋める(異常に速くなるときは足さない)。
+function computeDistance(d) {
+  d.cum = new Float64Array(d.n);
+  let total = 0, last = -1;
+  for (let i = 0; i < d.n; i++) {
+    if (d.valid[i]) {
+      if (last >= 0) {
+        const dt = d.t[i] - d.t[last];
+        if (dt <= 1) {
+          const v = (d.speed_kmh[i] + d.speed_kmh[last]) / 2;
+          if (v >= 1) total += v / 3.6 * dt; // 1 km/h 未満は止まっているとみなす
+        } else {
+          const m = haversine(d.lat[last], d.lon[last], d.lat[i], d.lon[i]);
+          if (m / dt < 100) total += m; // 360 km/h 超は FIX の飛びとみなす
+        }
+      }
+      last = i;
+    }
+    d.cum[i] = total;
+  }
+  d.distance = total;
+}
+
+// ---- G ----
+// 1 段階目: 静止区間ごとに「静止時の加速度 = 重力(上向き)」を取り、各行は時間的に最も近い静止区間を基準にして
+//   重力を引く。取り付けや路面の傾きが途中で変わっても、次に止まった時点から合う。
+// 2 段階目: GPS の速度変化(前後の加速度)と加速度センサーの向きを回帰して、車の前方向を推定し、前後 / 左右に分ける。
+const vsub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const vdot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const vlen = (a) => Math.hypot(a[0], a[1], a[2]);
+const vadd = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+const vscale = (a, k) => [a[0] * k, a[1] * k, a[2] * k];
+const vcross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const vunit = (a) => vscale(a, 1 / (vlen(a) || 1));
+const accAt = (d, i) => [d.acc_x[i], d.acc_y[i], d.acc_z[i]];
+
+function findStationary(d) {
+  const segs = [];
+  const still = (i) => d.valid[i] && d.speed_kmh[i] < 1 && isFinite(d.acc_x[i] + d.acc_y[i] + d.acc_z[i]);
+  for (let i = 0; i < d.n;) {
+    if (!still(i)) { i++; continue; }
+    let j = i;
+    while (j + 1 < d.n && still(j + 1) && d.t[j + 1] - d.t[j] < 0.5) j++;
+    // 前後 0.3 秒は、止まる / 動き出す途中の揺れを含むので除く
+    let a = i, b = j;
+    while (a < b && d.t[a] - d.t[i] < 0.3) a++;
+    while (b > a && d.t[j] - d.t[b] < 0.3) b--;
+    if (d.t[b] - d.t[a] >= 1.5) {
+      const m = [0, 0, 0];
+      for (let k = a; k <= b; k++) { m[0] += d.acc_x[k]; m[1] += d.acc_y[k]; m[2] += d.acc_z[k]; }
+      const cnt = b - a + 1;
+      const ref = vscale(m, 1 / cnt);
+      let dev = 0; // 手で持って動かしているなど、揺れている区間は基準にしない
+      for (let k = a; k <= b; k++) dev = Math.max(dev, vlen(vsub(accAt(d, k), ref)));
+      if (dev < 0.06 && Math.abs(vlen(ref) - 1) < 0.1) segs.push({ a, b, t0: d.t[a], t1: d.t[b], ref });
+    }
+    i = j + 1;
+  }
+  return segs;
+}
+
+function computeG(d) {
+  const n = d.n;
+  d.dynG = new Float64Array(n).fill(NaN);
+  d.fb = new Float64Array(n).fill(NaN);
+  d.lr = new Float64Array(n).fill(NaN);
+  d.hasG = false;
+  d.hasAxes = false;
+  d.vmax = 0;
+  d.gmax = 0.5;
+  for (let i = 0; i < n; i++) if (d.valid[i]) d.vmax = Math.max(d.vmax, d.speed_kmh[i]);
+
+  const segs = findStationary(d);
+  d.segCount = segs.length;
+  if (!segs.length) return; // 基準が取れないと G は出せない(走行中の加速度を基準にすると狂う)
+  d.hasG = true;
+
+  // 各行 → 時間的に最も近い静止区間
+  const segOf = new Int32Array(n);
+  let p = 0;
+  for (let i = 0; i < n; i++) {
+    while (p + 1 < segs.length && segs[p + 1].t0 <= d.t[i]) p++;
+    const dist = (s) => Math.max(0, s.t0 - d.t[i], d.t[i] - s.t1);
+    segOf[i] = p + 1 < segs.length && dist(segs[p + 1]) < dist(segs[p]) ? p + 1 : p;
+  }
+  // 取り付けが同じとみなせる区間をまとめる(基準ベクトルが近い)。傾斜での停止程度の差(約 8°)は同じ取り付けとみなす
+  const groups = [];
+  const groupOf = segs.map((s) => {
+    let g = groups.findIndex((q) => vlen(vsub(q.mean, s.ref)) < 0.15);
+    if (g < 0) { groups.push({ mean: s.ref, n: 0 }); g = groups.length - 1; }
+    const q = groups[g];
+    q.mean = vscale(vadd(vscale(q.mean, q.n), s.ref), 1 / (q.n + 1));
+    q.n++;
+    return g;
+  });
+  d.groupCount = groups.length;
+
+  // G(合成)
+  for (let i = 0; i < n; i++) {
+    const a = accAt(d, i);
+    if (!isFinite(a[0] + a[1] + a[2])) continue;
+    const g = vlen(vsub(a, segs[segOf[i]].ref));
+    d.dynG[i] = g;
+    if (g > d.gmax) d.gmax = g;
+  }
+
+  // 前後の加速度(GPS の速度変化)
+  const dts = [];
+  for (let i = 1; i < n; i += Math.max(1, Math.floor(n / 200))) dts.push(d.t[i] - d.t[i - 1]);
+  dts.sort((x, y) => x - y);
+  const k = Math.max(1, Math.round(0.4 / Math.max(0.005, dts[dts.length >> 1] || 0.04)));
+  const v = Float64Array.from({ length: n }, (_, i) => (d.fix[i] === 3 ? d.speed_kmh[i] / 3.6 : NaN));
+  const al = new Float64Array(n).fill(NaN);
+  for (let i = k; i < n - k; i++) {
+    const span = d.t[i + k] - d.t[i - k];
+    if (isFinite(v[i + k] + v[i - k]) && span > 0 && span < 1.5) al[i] = (v[i + k] - v[i - k]) / span / 9.80665;
+  }
+
+  // グループごとに前方向を推定する: ah(水平の動的加速度) ≈ al × 前方向
+  const acc = groups.map(() => ({ s1: [0, 0, 0], s2: 0, cnt: 0 }));
+  const horiz = (i) => {
+    const sg = segOf[i], u = vunit(segs[sg].ref);
+    const dyn = vsub(accAt(d, i), segs[sg].ref);
+    return { u, ah: vsub(dyn, vscale(u, vdot(dyn, u))), sg };
+  };
+  for (let i = 0; i < n; i++) {
+    if (!isFinite(al[i]) || !isFinite(d.dynG[i]) || v[i] < 8 / 3.6 || Math.abs(al[i]) < 0.05) continue;
+    const { u, ah, sg } = horiz(i);
+    const yaw = (d.gyro_x[i] * u[0] + d.gyro_y[i] * u[1] + d.gyro_z[i] * u[2]); // 曲がっている最中は左右の加速度が混ざる
+    if (!isFinite(yaw) || Math.abs(yaw) > 6) continue;
+    const q = acc[groupOf[sg]];
+    q.s1 = [q.s1[0] + al[i] * ah[0], q.s1[1] + al[i] * ah[1], q.s1[2] + al[i] * ah[2]];
+    q.s2 += al[i] * al[i];
+    q.cnt++;
+  }
+  const fwd = acc.map((q) => {
+    if (q.cnt < 40 || q.s2 <= 0) return null;
+    const f = vscale(q.s1, 1 / q.s2);
+    const m = vlen(f);
+    return m > 0.5 && m < 1.5 ? vunit(f) : null; // 大きさが 1 から外れる = 加速度と GPS の向きが合っていない
+  });
+  d.axesGroups = fwd.filter(Boolean).length;
+  if (!d.axesGroups) return;
+  d.hasAxes = true;
+  for (let i = 0; i < n; i++) {
+    if (!isFinite(d.dynG[i])) continue;
+    const f0 = fwd[groupOf[segOf[i]]];
+    if (!f0) continue;
+    const sg = segOf[i], u = vunit(segs[sg].ref);
+    const f = vunit(vsub(f0, vscale(u, vdot(f0, u)))); // 路面の傾きが違っても水平に直す
+    const r = vcross(f, u); // 右
+    const dyn = vsub(accAt(d, i), segs[sg].ref);
+    d.fb[i] = vdot(dyn, f);
+    d.lr[i] = vdot(dyn, r);
+  }
+}
+
 function build(rows, name) {
   // fix は 0 / 2 / 3 だけが本物。起動直後のダミー行(fix=87 など)は捨てる
   const ok = rows.filter((r) => ['0', '2', '3'].includes(r.fix) && r.t_ms !== '' && isFinite(+r.t_ms));
@@ -68,22 +233,8 @@ function build(rows, name) {
   }
   const firstHd = d.hd.find((v) => isFinite(v)) ?? 0;
   for (let i = 0; i < n && !isFinite(d.hd[i]); i++) d.hd[i] = firstHd;
-  // 静止時の加速度を基準にして重力を引く(車載の向きに依らず「動的 G」が出る)
-  const ref = [0, 0, 0];
-  let cnt = 0;
-  for (let i = 0; i < n && cnt < 250; i++) {
-    if (d.valid[i] && d.speed_kmh[i] < 1 && isFinite(d.acc_x[i] + d.acc_y[i] + d.acc_z[i])) { ref[0] += d.acc_x[i]; ref[1] += d.acc_y[i]; ref[2] += d.acc_z[i]; cnt++; }
-  }
-  // 静止した行が無いと基準が決められない(走行中の加速度を基準にすると G が狂う)ので、G は出さない
-  d.hasG = cnt > 0;
-  if (d.hasG) ref.forEach((_, k) => { ref[k] /= cnt; });
-  d.dynG = Float64Array.from({ length: n }, (_, i) => (d.hasG ? Math.hypot(d.acc_x[i] - ref[0], d.acc_y[i] - ref[1], d.acc_z[i] - ref[2]) : NaN));
-  d.vmax = 0;
-  d.gmax = 0.5;
-  for (let i = 0; i < n; i++) {
-    if (d.valid[i]) d.vmax = Math.max(d.vmax, d.speed_kmh[i]);
-    if (d.dynG[i] > d.gmax) d.gmax = d.dynG[i];
-  }
+  computeDistance(d);
+  computeG(d);
   return d;
 }
 
@@ -161,12 +312,14 @@ function clearView() {
   for (const id of ['g', 'acc', 'hdg', 'alt', 'gps', 'hacc', 'yaw', 'batt', 'clock']) $(id).textContent = '--';
   $('speed').firstChild.nodeValue = '--';
   $('gbar').style.width = '0';
+  $('dist').textContent = '--'; $('fblr').textContent = '--';
   $('pos').textContent = '0:00 / 0:00';
   $('seek').max = 0; $('seek').value = 0;
   $('vmax').textContent = '-- km/h';
   $('meta').textContent = 'CSV を選ぶか、ここにドロップしてください';
   layoutChart();
   drawCursor(0);
+  drawBall(0);
 }
 
 function fitTrack() {
@@ -175,6 +328,8 @@ function fitTrack() {
   if (ll.length) map.fitBounds(L.latLngBounds(ll), { padding: [40, 40], maxZoom: 18 });
 }
 
+const fmtKm = (m) => (m < 1000 ? `${Math.round(m)} m` : `${(m / 1000).toFixed(2)} km`);
+const signed = (v) => (v >= 0 ? '+' : '−') + Math.abs(v).toFixed(2);
 const fmtT = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 function jst(utc) {
   const m = /^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)/.exec(utc);
@@ -194,6 +349,9 @@ function show(T) {
   $('speed').firstChild.nodeValue = fix3 ? Math.round(D.speed_kmh[i]) : '--';
   $('clock').textContent = jst(D.utc[i]) || '--';
   $('g').textContent = D.hasG ? D.dynG[i].toFixed(2) + ' G' : '--';
+  $('dist').textContent = `${fmtKm(D.cum[i])} / ${fmtKm(D.distance)}`;
+  $('fblr').textContent = isFinite(D.fb[i]) ? `${signed(D.fb[i])} / ${signed(D.lr[i])} G` : '--';
+  drawBall(i);
   $('gbar').style.width = D.hasG ? Math.min(100, D.dynG[i] / Math.max(1.5, D.gmax) * 100) + '%' : '0';
   $('acc').textContent = `${D.acc_x[i].toFixed(2)} / ${D.acc_y[i].toFixed(2)} / ${D.acc_z[i].toFixed(2)}`;
   $('alt').textContent = fix3 ? D.alt_m[i].toFixed(0) + ' m' : '--';
@@ -215,6 +373,32 @@ function show(T) {
     if ($('follow').checked && !map.getBounds().pad(-0.3).contains(ll)) map.panTo(ll, { animate: false });
   }
   drawCursor(T);
+}
+
+// ---- G ボール(上 = 加速、下 = 減速、右 = 右向きの加速度 = 右コーナー。直近 1.5 秒の軌跡つき) ----
+const ballCv = $('ball'), bctx = ballCv.getContext('2d');
+function drawBall(i) {
+  const dpr = window.devicePixelRatio || 1;
+  const size = Math.round(ballCv.clientWidth * dpr);
+  if (size && ballCv.width !== size) { ballCv.width = size; ballCv.height = size; }
+  const W = ballCv.width, c = W / 2, R = W / 2 - 4 * dpr, scale = R / 1.5;
+  bctx.clearRect(0, 0, W, W);
+  bctx.lineWidth = dpr;
+  for (const g of [0.5, 1, 1.5]) {
+    bctx.strokeStyle = g === 1 ? '#ff4646' : '#26304d';
+    bctx.beginPath(); bctx.arc(c, c, g * scale, 0, 2 * Math.PI); bctx.stroke();
+  }
+  bctx.strokeStyle = '#26304d';
+  bctx.beginPath(); bctx.moveTo(c, c - R); bctx.lineTo(c, c + R); bctx.moveTo(c - R, c); bctx.lineTo(c + R, c); bctx.stroke();
+  if (!D || !isFinite(D.fb[i])) return;
+  for (let j = i; j >= 0 && D.t[i] - D.t[j] < 1.5; j -= 2) {
+    if (!isFinite(D.fb[j])) continue;
+    bctx.fillStyle = `rgba(0,205,255,${0.6 * (1 - (D.t[i] - D.t[j]) / 1.5)})`;
+    bctx.beginPath(); bctx.arc(c + D.lr[j] * scale, c - D.fb[j] * scale, 2.5 * dpr, 0, 2 * Math.PI); bctx.fill();
+  }
+  bctx.fillStyle = D.dynG[i] > 1 ? '#ff4646' : '#00cdff';
+  bctx.strokeStyle = '#fff'; bctx.lineWidth = 2 * dpr;
+  bctx.beginPath(); bctx.arc(c + D.lr[i] * scale, c - D.fb[i] * scale, 6 * dpr, 0, 2 * Math.PI); bctx.fill(); bctx.stroke();
 }
 
 // ---- グラフ(速度 + G。クリック / ドラッグでシーク) ----
@@ -323,8 +507,9 @@ function load(text, name) {
     return;
   }
   const skipped = D.n - D.nvalid;
-  $('meta').textContent = `${name}  ${D.n} 行 / ${fmtT(D.duration)} / 最高 ${Math.round(D.vmax)} km/h` + (skipped ? ` / 位置なし ${skipped} 行` : '');
+  $('meta').textContent = `${name}  ${D.n} 行 / ${fmtT(D.duration)} / 最高 ${Math.round(D.vmax)} km/h / ${fmtKm(D.distance)}` + (skipped ? ` / 位置なし ${skipped} 行` : '');
   if (!D.hasG) $('notice').textContent = '静止区間が無いため、G は表示しません';
+  else if (!D.hasAxes) $('notice').textContent = '直進での加減速が足りないため、前後 / 左右には分けません(合成 G のみ)';
   $('vmax').textContent = `${Math.round(D.vmax)} km/h`;
   $('seek').max = D.duration;
   arrowRot = D.hd[0];
