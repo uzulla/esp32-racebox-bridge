@@ -13,12 +13,14 @@ let theta = 0;
 const start = Date.UTC(2026, 0, 1, 0, 0, 0);
 for (let i = 0; i < HZ * SECONDS; i++) {
   const t = i / HZ;
-  const v = 8 + 14 * (0.5 - 0.5 * Math.cos(t * 2 * Math.PI / 23)); // 8〜22 m/s
+  // 最初の 3 秒は静止(G の基準に使われる)、その後 3 秒かけて発進し、8〜22 m/s で周回
+  const v = Math.min(1, Math.max(0, (t - 3) / 3)) * (8 + 14 * (0.5 - 0.5 * Math.cos(t * 2 * Math.PI / 23)));
   const w = v / R;
   theta += w / HZ;
   const x = R * Math.cos(theta), y = R * Math.sin(theta);
   const lat = lat0 + (y / mPerDegLat), lon = lon0 + (x / mPerDegLon);
-  const heading = ((90 - theta * 180 / Math.PI + 90) % 360 + 360) % 360;
+  // 位置は (R cosθ, R sinθ)(東, 北)で θ が増える向きに進むので、進行方向は (-sinθ, cosθ) = 方位 -θ
+  const heading = ((-theta * 180 / Math.PI) % 360 + 360) % 360;
   const dv = (14 * 0.5 * Math.sin(t * 2 * Math.PI / 23) * 2 * Math.PI / 23);
   const gLat = v * w / 9.80665, gLon = dv / 9.80665;
   const utc = new Date(start + i * 1000 / HZ).toISOString();

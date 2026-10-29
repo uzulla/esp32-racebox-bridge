@@ -42,7 +42,8 @@ function build(rows, name) {
   const n = ok.length;
   if (!n) throw new Error('有効な行がありません');
   const num = (k) => Float64Array.from(ok, (r) => +r[k]);
-  const d = { name, n, utc: ok.map((r) => r.utc) };
+  // batt は Mini が整数(%)、Micro が小数 1 桁(V)。区別のため元の文字列を残す
+  const d = { name, n, utc: ok.map((r) => r.utc), battRaw: ok.map((r) => r.batt) };
   for (const k of COLS.filter((c) => c !== 'utc')) d[k] = num(k);
   const t0 = d.t_ms[0];
   d.t = Float64Array.from(d.t_ms, (v) => (v - t0) / 1000);
@@ -51,7 +52,8 @@ function build(rows, name) {
   d.posIdx = new Int32Array(n); // その行以前で最後に位置が使えた行
   let last = -1, nvalid = 0;
   for (let i = 0; i < n; i++) {
-    if (d.fix[i] === 3 && d.hacc_m[i] < 100 && (d.lat[i] !== 0 || d.lon[i] !== 0)) { d.valid[i] = 1; last = i; nvalid++; }
+    if (d.fix[i] === 3 && d.hacc_m[i] < 100 && (d.lat[i] !== 0 || d.lon[i] !== 0) &&
+        Math.abs(d.lat[i]) <= 90 && Math.abs(d.lon[i]) <= 180) { d.valid[i] = 1; last = i; nvalid++; }
     d.posIdx[i] = last;
   }
   d.nvalid = nvalid;
@@ -61,12 +63,16 @@ function build(rows, name) {
   for (let i = 0; i < n && cnt < 250; i++) {
     if (d.valid[i] && d.speed_kmh[i] < 1) { ref[0] += d.acc_x[i]; ref[1] += d.acc_y[i]; ref[2] += d.acc_z[i]; cnt++; }
   }
-  if (!cnt) { for (let i = 0; i < Math.min(n, 250); i++) { ref[0] += d.acc_x[i]; ref[1] += d.acc_y[i]; ref[2] += d.acc_z[i]; cnt++; } }
-  ref.forEach((_, k) => { ref[k] /= cnt; });
-  d.dynG = Float64Array.from({ length: n }, (_, i) => Math.hypot(d.acc_x[i] - ref[0], d.acc_y[i] - ref[1], d.acc_z[i] - ref[2]));
+  // 静止した行が無いと基準が決められない(走行中の加速度を基準にすると G が狂う)ので、G は出さない
+  d.hasG = cnt > 0;
+  if (d.hasG) ref.forEach((_, k) => { ref[k] /= cnt; });
+  d.dynG = Float64Array.from({ length: n }, (_, i) => (d.hasG ? Math.hypot(d.acc_x[i] - ref[0], d.acc_y[i] - ref[1], d.acc_z[i] - ref[2]) : NaN));
   d.vmax = 0;
-  for (let i = 0; i < n; i++) if (d.valid[i]) d.vmax = Math.max(d.vmax, d.speed_kmh[i]);
-  d.gmax = Math.max(0.5, ...d.dynG);
+  d.gmax = 0.5;
+  for (let i = 0; i < n; i++) {
+    if (d.valid[i]) d.vmax = Math.max(d.vmax, d.speed_kmh[i]);
+    if (d.dynG[i] > d.gmax) d.gmax = d.dynG[i];
+  }
   return d;
 }
 
@@ -91,6 +97,7 @@ function drawTrack() {
     const i = pts[k];
     const dt = D.t[i] - D.t[prev];
     if (dt < 0.2 && k < pts.length - 1) continue; // 5Hz 程度に間引く
+    if (dt > 3) { prev = i; continue; } // FIX が途切れていた区間は線で結ばない
     L.polyline([[D.lat[prev], D.lon[prev]], [D.lat[i], D.lon[i]]], { color: speedColor(D.speed_kmh[i], D.vmax), weight: 5, opacity: 0.9, renderer }).addTo(trackLayer);
     prev = i;
   }
@@ -107,7 +114,7 @@ function drawTrack() {
 
 function fitTrack() {
   const ll = [];
-  for (let i = 0; i < D.n; i += 5) if (D.valid[i]) ll.push([D.lat[i], D.lon[i]]);
+  for (let i = 0; i < D.n; i++) if (D.valid[i]) ll.push([D.lat[i], D.lon[i]]);
   if (ll.length) map.fitBounds(L.latLngBounds(ll), { padding: [40, 40], maxZoom: 18 });
 }
 
@@ -129,14 +136,15 @@ function show(T) {
   const fix3 = D.fix[i] === 3;
   $('speed').firstChild.nodeValue = fix3 ? Math.round(D.speed_kmh[i]) : '--';
   $('clock').textContent = jst(D.utc[i]) || '--';
-  $('g').textContent = D.dynG[i].toFixed(2) + ' G';
-  $('gbar').style.width = Math.min(100, D.dynG[i] / Math.max(1.5, D.gmax) * 100) + '%';
+  $('g').textContent = D.hasG ? D.dynG[i].toFixed(2) + ' G' : '--';
+  $('gbar').style.width = D.hasG ? Math.min(100, D.dynG[i] / Math.max(1.5, D.gmax) * 100) + '%' : '0';
   $('acc').textContent = `${D.acc_x[i].toFixed(2)} / ${D.acc_y[i].toFixed(2)} / ${D.acc_z[i].toFixed(2)}`;
   $('alt').textContent = fix3 ? D.alt_m[i].toFixed(0) + ' m' : '--';
   $('gps').textContent = fix3 ? `3D FIX ${D.sats[i]} 衛星` : D.fix[i] === 2 ? `2D FIX ${D.sats[i]} 衛星` : 'FIX なし';
   $('hacc').textContent = fix3 ? D.hacc_m[i].toFixed(1) + ' m' : '--';
   $('yaw').textContent = D.gyro_z[i].toFixed(1) + ' °/s';
-  $('batt').textContent = D.batt[i] + (D.charging[i] ? ' % 充電中' : ' %');
+  const braw = D.battRaw[i];
+  $('batt').textContent = braw.includes('.') ? `${(+braw).toFixed(1)} V` : `${braw} %` + (D.charging[i] ? ' 充電中' : '');
   if (fix3 && D.speed_kmh[i] > 2) heading = D.heading_deg[i];
   $('hdg').textContent = fix3 ? `${Math.round(heading)}°` : '--';
   $('pos').textContent = `${fmtT(T)} / ${fmtT(D.duration)}`;
@@ -239,6 +247,7 @@ map.on('dragstart', () => { $('follow').checked = false; });
 
 // ---- 読み込み ----
 function load(text, name) {
+  loadSeq++; // 保留中のサーバー読み込みを無効にする
   try {
     setPlaying(false);
     $('notice').textContent = '';
@@ -250,6 +259,7 @@ function load(text, name) {
   }
   const skipped = D.n - D.nvalid;
   $('meta').textContent = `${name}  ${D.n} 行 / ${fmtT(D.duration)} / 最高 ${Math.round(D.vmax)} km/h` + (skipped ? ` / 位置なし ${skipped} 行` : '');
+  if (!D.hasG) $('notice').textContent = '静止区間が無いため、G は表示しません';
   $('vmax').textContent = `${Math.round(D.vmax)} km/h`;
   $('seek').max = D.duration;
   heading = 0;
@@ -259,10 +269,20 @@ function load(text, name) {
   show(0);
 }
 
+// 選び直したとき、遅れて届いた古い応答で上書きしないよう連番で最新だけ反映する
+let loadSeq = 0;
 async function loadServer(name) {
-  const r = await fetch('/api/file?name=' + encodeURIComponent(name));
-  if (!r.ok) { $('notice').textContent = '読み込めませんでした'; return; }
-  load(await r.text(), name);
+  const seq = ++loadSeq;
+  try {
+    const r = await fetch('/api/file?name=' + encodeURIComponent(name));
+    if (seq !== loadSeq) return;
+    if (!r.ok) { $('notice').textContent = '読み込めませんでした'; return; }
+    const text = await r.text();
+    if (seq !== loadSeq) return;
+    load(text, name);
+  } catch (e) {
+    if (seq === loadSeq) $('notice').textContent = '読み込めませんでした';
+  }
 }
 $('files').onchange = (e) => e.target.value && loadServer(e.target.value);
 $('pick').onchange = async (e) => { const f = e.target.files[0]; if (f) load(await f.text(), f.name); };

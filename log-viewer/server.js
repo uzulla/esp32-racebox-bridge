@@ -29,21 +29,28 @@ const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost');
 
   if (url.pathname === '/api/files') {
-    let files = [];
-    try {
-      files = fs.readdirSync(logDir)
-        .filter((f) => f.toLowerCase().endsWith('.csv'))
-        .sort()
-        .map((f) => ({ name: f, size: fs.statSync(path.join(logDir, f)).size }));
-    } catch (e) { /* ディレクトリがなければ空 */ }
+    const files = [];
+    let names = [];
+    try { names = fs.readdirSync(logDir); } catch (e) { /* ディレクトリがなければ空 */ }
+    for (const f of names.filter((n) => n.toLowerCase().endsWith('.csv')).sort()) {
+      try {
+        const st = fs.statSync(path.join(logDir, f));
+        if (st.isFile()) files.push({ name: f, size: st.size });
+      } catch (e) { /* 読めない 1 件だけ除く */ }
+    }
     return send(res, 200, JSON.stringify(files), 'application/json');
   }
 
   if (url.pathname === '/api/file') {
     const name = path.basename(url.searchParams.get('name') || '');
     const p = path.join(logDir, name);
-    if (!name.toLowerCase().endsWith('.csv') || !fs.existsSync(p)) return send(res, 404, 'not found');
-    return send(res, 200, fs.readFileSync(p), 'text/csv; charset=utf-8');
+    if (!name.toLowerCase().endsWith('.csv')) return send(res, 404, 'not found');
+    try {
+      if (!fs.statSync(p).isFile()) return send(res, 404, 'not found');
+      return send(res, 200, fs.readFileSync(p), 'text/csv; charset=utf-8');
+    } catch (e) {
+      return send(res, 404, 'not found');
+    }
   }
 
   if (url.pathname.startsWith('/vendor/')) return serveStatic(res, roots.vendor, url.pathname.slice('/vendor/'.length));
