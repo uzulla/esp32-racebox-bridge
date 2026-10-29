@@ -21,8 +21,15 @@ function send(res, code, body, type = 'text/plain; charset=utf-8') {
 
 function serveStatic(res, root, rel) {
   const p = path.join(root, path.normalize(rel));
-  if (!p.startsWith(root + path.sep) || !fs.existsSync(p) || !fs.statSync(p).isFile()) return send(res, 404, 'not found');
-  send(res, 200, fs.readFileSync(p), types[path.extname(p)] || 'application/octet-stream');
+  if (!p.startsWith(root + path.sep)) return send(res, 404, 'not found');
+  let body;
+  try {
+    if (!fs.statSync(p).isFile()) return send(res, 404, 'not found');
+    body = fs.readFileSync(p);
+  } catch (e) {
+    return send(res, e.code === 'ENOENT' ? 404 : 500, e.code === 'ENOENT' ? 'not found' : 'read error');
+  }
+  send(res, 200, body, types[path.extname(p)] || 'application/octet-stream');
 }
 
 const server = http.createServer((req, res) => {

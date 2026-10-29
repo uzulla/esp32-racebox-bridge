@@ -399,7 +399,7 @@ function build(rows, name) {
   // 空欄は 0 ではなく欠測(NaN)として扱う
   const num = (k) => Float64Array.from(ok, (r) => (r[k] === '' || r[k] === undefined ? NaN : +r[k]));
   // batt は Mini が整数(%)、Micro が小数 1 桁(V)。区別のため元の文字列を残す
-  const d = { name, n, utc: ok.map((r) => r.utc), battRaw: ok.map((r) => r.batt) };
+  const d = { name, n, utc: ok.map((r) => r.utc), battRaw: ok.map((r) => r.batt ?? '') };
   for (const k of COLS.filter((c) => c !== 'utc')) d[k] = num(k);
   const t0 = d.t_ms[0];
   d.t = Float64Array.from(d.t_ms, (v) => (v - t0) / 1000);
@@ -532,6 +532,8 @@ function fitTrack() {
   if (ll.length) map.fitBounds(L.latLngBounds(ll), { padding: [40, 40], maxZoom: 18 });
 }
 
+// 欠測(NaN)は「NaN」と出さずに「--」にする
+const fnum = (v, digits, unit = '') => (Number.isFinite(v) ? v.toFixed(digits) + unit : '--');
 const fmtKm = (m) => (m < 1000 ? `${Math.round(m)} m` : `${(m / 1000).toFixed(2)} km`);
 const signed = (v) => (v >= 0 ? '+' : '−') + Math.abs(v).toFixed(2);
 const fmtT = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
@@ -550,20 +552,20 @@ function show(T) {
   const i = Math.max(0, upperBound(D.t, T) - 1);
   const pi = D.posIdx[i] >= 0 ? D.posIdx[i] : D.firstValid; // FIX 前は最初の有効位置に置く
   const fix3 = D.fix[i] === 3;
-  $('speed').firstChild.nodeValue = fix3 ? Math.round(D.speed_kmh[i]) : '--';
+  $('speed').firstChild.nodeValue = fix3 && Number.isFinite(D.speed_kmh[i]) ? Math.round(D.speed_kmh[i]) : '--';
   $('clock').textContent = jst(D.utc[i]) || '--';
-  $('g').textContent = D.hasG ? D.dynG[i].toFixed(2) + ' G' : '--';
+  $('g').textContent = D.hasG ? fnum(D.dynG[i], 2, ' G') : '--';
   $('dist').textContent = `${fmtKm(D.cum[i])} / ${fmtKm(D.distance)}`;
   $('fblr').textContent = isFinite(D.fb[i]) ? `${signed(D.fb[i])} / ${signed(D.lr[i])} G` : '--';
   drawBall(i);
   $('gbar').style.width = D.hasG ? Math.min(100, D.dynG[i] / Math.max(1.5, D.gmax) * 100) + '%' : '0';
-  $('acc').textContent = `${D.acc_x[i].toFixed(2)} / ${D.acc_y[i].toFixed(2)} / ${D.acc_z[i].toFixed(2)}`;
-  $('alt').textContent = fix3 ? D.alt_m[i].toFixed(0) + ' m' : '--';
+  $('acc').textContent = `${fnum(D.acc_x[i], 2)} / ${fnum(D.acc_y[i], 2)} / ${fnum(D.acc_z[i], 2)}`;
+  $('alt').textContent = fix3 ? fnum(D.alt_m[i], 0, ' m') : '--';
   $('gps').textContent = fix3 ? `3D FIX ${D.sats[i]} 衛星` : D.fix[i] === 2 ? `2D FIX ${D.sats[i]} 衛星` : 'FIX なし';
-  $('hacc').textContent = fix3 ? D.hacc_m[i].toFixed(1) + ' m' : '--';
-  $('yaw').textContent = D.gyro_z[i].toFixed(1) + ' °/s';
+  $('hacc').textContent = fix3 ? fnum(D.hacc_m[i], 1, ' m') : '--';
+  $('yaw').textContent = fnum(D.gyro_z[i], 1, ' °/s');
   const braw = D.battRaw[i];
-  $('batt').textContent = braw.includes('.') ? `${(+braw).toFixed(1)} V` : `${braw} %` + (D.charging[i] ? ' 充電中' : '');
+  $('batt').textContent = braw === '' || !isFinite(+braw) ? '--' : braw.includes('.') ? `${(+braw).toFixed(1)} V` : `${braw} %` + (D.charging[i] ? ' 充電中' : '');
   const heading = D.hd[i];
   $('hdg').textContent = fix3 ? `${Math.round(heading)}°` : '--';
   $('pos').textContent = `${fmtT(T)} / ${fmtT(D.duration)}`;
@@ -727,24 +729,30 @@ function load(text, name) {
 
 // 選び直したとき、遅れて届いた古い応答で上書きしないよう連番で最新だけ反映する
 let loadSeq = 0;
+// 読み込みに失敗したら、選択欄を今表示しているログに戻す(名前と表示内容を食い違わせない)
+function loadFailed() {
+  $('notice').textContent = '読み込めませんでした';
+  $('files').value = D ? D.name : '';
+}
 async function loadServer(name) {
   const seq = ++loadSeq;
   try {
     const r = await fetch('/api/file?name=' + encodeURIComponent(name));
     if (seq !== loadSeq) return;
-    if (!r.ok) { $('notice').textContent = '読み込めませんでした'; return; }
+    if (!r.ok) { loadFailed(); return; }
     const text = await r.text();
     if (seq !== loadSeq) return;
     load(text, name);
   } catch (e) {
-    if (seq === loadSeq) $('notice').textContent = '読み込めませんでした';
+    if (seq === loadSeq) loadFailed();
   }
 }
 $('files').onchange = (e) => e.target.value && loadServer(e.target.value);
 // await 中に別のファイルが選ばれたら、遅れて解決した古い方は捨てる
 async function loadFile(f) {
   const seq = ++loadSeq;
-  const text = await f.text();
+  let text;
+  try { text = await f.text(); } catch (e) { if (seq === loadSeq) loadFailed(); return; }
   if (seq === loadSeq) load(text, f.name);
 }
 $('pick').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) loadFile(f); };
@@ -793,11 +801,12 @@ addEventListener('drop', async (e) => {
 });
 
 (async function init() {
+  const seq = loadSeq; // 一覧を待つ間にユーザーが別のファイルを選んだら、自動選択はしない
   const files = await (await fetch('/api/files')).json();
   const sel = $('files');
   sel.replaceChildren(new Option('logs/ から選ぶ…', ''), ...files.map((f) => new Option(`${f.name} (${(f.size / 1024).toFixed(0)} KB)`, f.name)));
   layoutChart();
   // 実走ログ(最も大きい CSV)があれば最初に開く。無ければ先頭
   const pick = files.slice().sort((a, b) => b.size - a.size)[0];
-  if (pick) { sel.value = pick.name; loadServer(pick.name); }
+  if (pick && seq === loadSeq) { sel.value = pick.name; loadServer(pick.name); }
 })();
