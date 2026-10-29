@@ -62,7 +62,8 @@ If a FAT32 microSD card is in the slot at boot, every RaceBox data message is lo
 `t_ms,utc,fix,sats,lat,lon,alt_m,speed_kmh,heading_deg,hacc_m,acc_x..z,gyro_x..z,batt,charging`).
 The session number counts up per boot (kept in NVS). Flushed every second.
 
-- No card, an unreadable card (exFAT, ...), a full card or a write error: no recording, never retried.
+- No card, an unreadable card (exFAT, ...), a full card or a write error: no recording, and nothing is retried by itself.
+  Insert a (good) card and **long-press** to start recording, also after `SD ERR`.
 - **Hold the BOOT button for 1.5 s** to stop: the LCD shows `SAVING` then `SAFE` (green); only then pull the card.
   Another long press from `SAFE` mounts the card again and records to the next file (`_02`, ...). A short press still switches the LCD page.
 - LCD: `REC` / `SAVING` / `SAFE` / `SD ERR` replaces "BRIDGE" in the status page's title bar and sits at the bottom

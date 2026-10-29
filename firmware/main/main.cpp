@@ -828,9 +828,9 @@ extern "C" void app_main() {
 }
 
 void bridge::onLongPress() {
-  if (sdlog::state() == sdlog::State::Safe) {
-    sdlog::requestStart();
-  } else {
+  if (sdlog::state() == sdlog::State::Rec) {
     sdlog::requestStop();
+  } else {
+    sdlog::requestStart();  // Safe, Failed or no card at boot; ignored while saving
   }
 }

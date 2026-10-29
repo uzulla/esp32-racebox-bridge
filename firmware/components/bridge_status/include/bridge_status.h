@@ -46,7 +46,7 @@ void frontendStart();
 void frontendUpdate(const Status& s);
 
 // Implemented by the bridge, called by a frontend when the user long-presses its button: stops the SD
-// recording and makes the card safe to remove; from that state, starts recording again.
+// recording and makes the card safe to remove; otherwise tries to start recording (after SAFE, SD ERR, or a card inserted late).
 void onLongPress();
 
 }  // namespace bridge
