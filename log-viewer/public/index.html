@@ -52,7 +52,7 @@
   <select id="files" title="logs/ のCSV"></select>
   <input type="file" id="pick" accept=".csv,text/csv">
   <span class="opts">
-    <label title="加速度とジャイロが静かで、GPS の速度もほぼ 0 の間は、位置のふらつき(ドリフト)を消して一点に固定し、速度を 0 にします"><input type="checkbox" id="still" checked> 停止中は位置を固定</label>
+    <label title="加速度とジャイロが静かで、GPS の速度もほぼ 0 の区間を「停止」と判定し、その間の GPS の位置のふらつき(ドリフト)を一点に固定、速度を 0 にします。外すと GPS の生の値のままです"><input type="checkbox" id="still" checked> GPS ドリフトを加速度・ジャイロで抑制</label>
     <label>途切れの補完 <select id="gapmode" title="GPS が 1 秒より長く途切れた区間の距離と道筋の出し方"><option value="inertial" selected>慣性(加速度+ジャイロ)</option><option value="line">直線</option></select></label>
     <label>軌跡の細かさ <select id="density" title="高くすると長いログで描画が重くなります"><option value="0.1">0.1 Hz (10秒に1点)</option><option value="0.2">0.2 Hz</option><option value="0.5">0.5 Hz</option><option value="1">1 Hz</option><option value="2" selected>2 Hz</option><option value="5">5 Hz</option><option value="10">10 Hz</option><option value="25">25 Hz</option></select></label>
   </span>
