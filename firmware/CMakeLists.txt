@@ -11,5 +11,11 @@ if(NOT EXISTS ${CMAKE_CURRENT_LIST_DIR}/frontends/${RACEBOX_FRONTEND}/frontend)
 endif()
 list(APPEND EXTRA_COMPONENT_DIRS ${CMAKE_CURRENT_LIST_DIR}/frontends/${RACEBOX_FRONTEND}/frontend)
 
+# Variants with a microSD slot (c6-geek) log to it: -DRACEBOX_SDLOG=1. The LCD then shares the SPI bus
+# that components/sdlog initialises.
+if(RACEBOX_SDLOG)
+    add_compile_definitions(RACEBOX_SDLOG=1)
+endif()
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(racebox-udp)

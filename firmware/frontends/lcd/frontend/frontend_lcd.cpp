@@ -170,6 +170,21 @@ void drawTopBattery(const Status& s, bool fresh) {
   text(x + 24, 5, b, 1, !known ? kDim : s.charging ? kCyan : kWhite);
 }
 
+// SD log state: a dot and a word. Nothing while there is no card.
+// While recording the dot blinks at 1 Hz (unless `dot` is false: the page shows its own big one).
+void drawRec(int x, int y, int rec, int scale, int64_t now, bool dot = true) {
+  static const struct { const char* word; uint16_t col; } kRec[] = {
+      {nullptr, 0}, {"REC", kRed}, {"SAVING", kAmber}, {"SAFE", kGreen}, {"SD ERR", kRed}};
+  if (rec < 1 || rec > 4) return;
+  if (dot && (rec != 1 || (now / 500000) % 2 == 0)) disc(x + 2 + 2 * scale, y + 3 * scale, 1 + 2 * scale, kRec[rec].col);
+  text(x + 6 + 4 * scale, y, kRec[rec].word, scale, kRec[rec].col);
+}
+
+// Big red dot blinking at 1 Hz while the SD card is being recorded to; visible at a glance.
+void drawRecDot(int cx, int cy, int r, int rec, int64_t now) {
+  if (rec == 1 && (now / 500000) % 2 == 0) disc(cx, cy, r, kRed);
+}
+
 // ---------------------------------------------------------------------------
 // Page 1: status
 
@@ -180,7 +195,8 @@ void drawStatusPage(const Status& s, int rate, int64_t now) {
   fillRect(0, 0, W, 18, kBar);
   fillRect(0, 18, W, 1, kCyan);
   text(6, 2, "RACEBOX", 2, kCyan);
-  text(96, 2, "BRIDGE", 2, kDim);
+  if (s.rec) drawRec(94, 2, s.rec, 2, now);
+  else text(96, 2, "BRIDGE", 2, kDim);
   drawTopBattery(s, fresh);
 
   auto label = [](int y, const char* t) { text(22, y, t, 2, kDim); };
@@ -318,6 +334,9 @@ void drawSpeedPage(const Status& s, int64_t now) {
   }
   text((W - textWidth(b, 2)) / 2, 4, b, 2, fresh && s.headingValid ? kWhite : kDim);
 
+  drawRec(50, 118, s.rec, 1, now, false);
+  drawRecDot(11, 11, 8, s.rec, now);
+
   // Bottom row: G, unit.
   if (fresh && dynMg >= 0) {
     snprintf(b, sizeof(b), "%d.%02dG", dynMg / 1000, dynMg % 1000 / 10);
@@ -352,6 +371,7 @@ void initLcd() {
   txDone = xSemaphoreCreateBinary();
   xSemaphoreGive(txDone);
 
+#ifndef RACEBOX_SDLOG  // with the SD log, components/sdlog owns the bus (SPI2) and mirrors its pins to ours
   spi_bus_config_t bus = {};
   bus.sclk_io_num = kSclk;
   bus.mosi_io_num = kMosi;
@@ -360,6 +380,7 @@ void initLcd() {
   bus.quadhd_io_num = -1;
   bus.max_transfer_sz = W * H * 2;
   ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_CH_AUTO));
+#endif
 
   esp_lcd_panel_io_handle_t io;
   esp_lcd_panel_io_spi_config_t ioc = {};
@@ -390,14 +411,19 @@ void initLcd() {
   gpio_set_level(kBl, 1);
 }
 
-// Short press: next page.
+// Short press (on release): next page. Long press (while held): stop the SD recording.
 void pollButton(int64_t now) {
   static int64_t downAt = 0;
+  static bool longDone = false;
   const bool down = gpio_get_level(kBtn) == 0;
   if (down && !downAt) {
     downAt = now;
+    longDone = false;
+  } else if (down && !longDone && now - downAt >= 1500000) {
+    longDone = true;
+    onLongPress();
   } else if (!down && downAt) {
-    if (now - downAt >= 30000) page = (page + 1) % kPages;
+    if (!longDone && now - downAt >= 30000) page = (page + 1) % kPages;
     downAt = 0;
   }
 }

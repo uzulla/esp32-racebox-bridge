@@ -55,6 +55,22 @@ cmake -S test/host -B test/host/build && cmake --build test/host/build && test/h
 - Power: dynamic frequency scaling between 80 MHz and 160 MHz (`CONFIG_PM_ENABLE`).
 - Partition table keeps NVS at 0x9000 and has two OTA slots.
 
+### SD log (c6-geek)
+
+If a FAT32 microSD card is in the slot at boot, every RaceBox data message is logged to
+`/log_<session 4 digits>_01.csv` (same style as the M5Stack gmeter logs: `#` comment lines, a header row,
+`t_ms,utc,fix,sats,lat,lon,alt_m,speed_kmh,heading_deg,hacc_m,acc_x..z,gyro_x..z,batt,charging`).
+The session number counts up per boot (kept in NVS). Flushed every second.
+
+- No card, an unreadable card (exFAT, ...), a full card or a write error: no recording, never retried.
+- **Hold the BOOT button for 1.5 s** to stop: the LCD shows `SAVING` then `SAFE` (green); only then pull the card.
+  Another long press from `SAFE` mounts the card again and records to the next file (`_02`, ...). A short press still switches the LCD page.
+- LCD: `REC` / `SAVING` / `SAFE` / `SD ERR` replaces "BRIDGE" in the status page's title bar and sits at the bottom
+  left of the speedometer page.
+- The TF slot (GPIO18/19/20/23, board v1) and the LCD both need the ESP32-C6's only SPI host, so `components/sdlog`
+  initialises SPI2 with the TF pins and routes its clock/MOSI to the LCD pins (GPIO1/2) too; each device only reacts
+  to its own CS. Board v2 wires the TF slot differently and is not supported.
+
 ### Soft AP
 
 The Wi-Fi runs as AP+STA. The STA joins the configured network (below); the AP `RCBXBRD-XXXXXX` lets a phone or PC

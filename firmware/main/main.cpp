@@ -28,6 +28,7 @@
 #include "ap_credentials.h"  // generated per build, see CMakeLists.txt
 #include "bridge_status.h"
 #include "racebox.h"
+#include "sdlog.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
 
@@ -629,6 +630,7 @@ static void publishStatus(const racebox::Data* d) {
   ds.wifiUp = broadcastAddr != 0;
   ds.dataPackets = dataPackets;
   ds.udpErrors = udpErrors;
+  ds.rec = static_cast<uint8_t>(sdlog::state());
   const int64_t now = esp_timer_get_time();
   if (now - apAt >= 1000000) {  // RSSI and IP change slowly
     apAt = now;
@@ -674,6 +676,7 @@ static void handlePacket() {
   racebox::Data d;
   if (!racebox::decodeData(parser.payload(), parser.payloadLen(), d)) return;
   dataPackets++;
+  sdlog::write(d, strncmp(targetName, "RaceBox Micro", 13) == 0);
   publishStatus(&d);
 
   // toJson() returns 0 rather than produce a datagram over the size cap.
@@ -810,6 +813,7 @@ extern "C" void app_main() {
 
   initConsole();
   rxStream = xStreamBufferCreate(8192, 1);
+  sdlog::init();  // before the frontend: the LCD shares its SPI bus
   bridge::frontendStart();
   initWifi();
   initBle();
@@ -821,4 +825,12 @@ extern "C" void app_main() {
 
   xTaskCreate(dataTask, "data", 6144, nullptr, 10, nullptr);
   xTaskCreate(consoleTask, "console", 4096, nullptr, 2, nullptr);
+}
+
+void bridge::onLongPress() {
+  if (sdlog::state() == sdlog::State::Safe) {
+    sdlog::requestStart();
+  } else {
+    sdlog::requestStop();
+  }
 }
