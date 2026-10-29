@@ -26,7 +26,8 @@ function serveStatic(res, root, rel) {
 }
 
 const server = http.createServer((req, res) => {
-  const url = new URL(req.url, 'http://localhost');
+  let url;
+  try { url = new URL(req.url, 'http://localhost'); } catch (e) { return send(res, 400, 'bad request'); } // 例: GET //
 
   if (url.pathname === '/api/files') {
     const files = [];

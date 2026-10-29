@@ -38,10 +38,11 @@ function parseCsv(text) {
 
 function build(rows, name) {
   // fix は 0 / 2 / 3 だけが本物。起動直後のダミー行(fix=87 など)は捨てる
-  const ok = rows.filter((r) => ['0', '2', '3'].includes(r.fix) && isFinite(+r.t_ms));
+  const ok = rows.filter((r) => ['0', '2', '3'].includes(r.fix) && r.t_ms !== '' && isFinite(+r.t_ms));
   const n = ok.length;
   if (!n) throw new Error('有効な行がありません');
-  const num = (k) => Float64Array.from(ok, (r) => +r[k]);
+  // 空欄は 0 ではなく欠測(NaN)として扱う
+  const num = (k) => Float64Array.from(ok, (r) => (r[k] === '' || r[k] === undefined ? NaN : +r[k]));
   // batt は Mini が整数(%)、Micro が小数 1 桁(V)。区別のため元の文字列を残す
   const d = { name, n, utc: ok.map((r) => r.utc), battRaw: ok.map((r) => r.batt) };
   for (const k of COLS.filter((c) => c !== 'utc')) d[k] = num(k);
@@ -52,16 +53,26 @@ function build(rows, name) {
   d.posIdx = new Int32Array(n); // その行以前で最後に位置が使えた行
   let last = -1, nvalid = 0;
   for (let i = 0; i < n; i++) {
-    if (d.fix[i] === 3 && d.hacc_m[i] < 100 && (d.lat[i] !== 0 || d.lon[i] !== 0) &&
+    if (d.fix[i] === 3 && d.hacc_m[i] < 100 && isFinite(d.speed_kmh[i]) && (d.lat[i] !== 0 || d.lon[i] !== 0) &&
         Math.abs(d.lat[i]) <= 90 && Math.abs(d.lon[i]) <= 180) { d.valid[i] = 1; last = i; nvalid++; }
     d.posIdx[i] = last;
   }
   d.nvalid = nvalid;
+  d.firstValid = d.valid.indexOf(1);
+  // 方位: その行以前で最後に走っていた(2 km/h 超)ときの値。シークの履歴に依らない。走り出す前は最初の値
+  d.hd = new Float64Array(n).fill(NaN);
+  let cur = NaN;
+  for (let i = 0; i < n; i++) {
+    if (d.fix[i] === 3 && d.speed_kmh[i] > 2 && isFinite(d.heading_deg[i])) cur = d.heading_deg[i];
+    d.hd[i] = cur;
+  }
+  const firstHd = d.hd.find((v) => isFinite(v)) ?? 0;
+  for (let i = 0; i < n && !isFinite(d.hd[i]); i++) d.hd[i] = firstHd;
   // 静止時の加速度を基準にして重力を引く(車載の向きに依らず「動的 G」が出る)
   const ref = [0, 0, 0];
   let cnt = 0;
   for (let i = 0; i < n && cnt < 250; i++) {
-    if (d.valid[i] && d.speed_kmh[i] < 1) { ref[0] += d.acc_x[i]; ref[1] += d.acc_y[i]; ref[2] += d.acc_z[i]; cnt++; }
+    if (d.valid[i] && d.speed_kmh[i] < 1 && isFinite(d.acc_x[i] + d.acc_y[i] + d.acc_z[i])) { ref[0] += d.acc_x[i]; ref[1] += d.acc_y[i]; ref[2] += d.acc_z[i]; cnt++; }
   }
   // 静止した行が無いと基準が決められない(走行中の加速度を基準にすると G が狂う)ので、G は出さない
   d.hasG = cnt > 0;
@@ -79,37 +90,83 @@ function build(rows, name) {
 // ---- 表示 ----
 const RAMP = [[59, 107, 255], [50, 230, 120], [255, 208, 0], [255, 70, 70]];
 function speedColor(v, vmax) {
+  if (!isFinite(v)) v = 0;
   const f = Math.min(1, v / Math.max(vmax, 1)) * (RAMP.length - 1);
   const i = Math.min(RAMP.length - 2, Math.floor(f)), u = f - i;
   const c = RAMP[i].map((a, k) => Math.round(a + (RAMP[i + 1][k] - a) * u));
   return `rgb(${c[0]},${c[1]},${c[2]})`;
 }
 
+// 軌跡の細かさ(Hz)。25Hz のまま全点を描くと長いログで重いので、既定は 2Hz
+let trackHz = 2;
+const BINS = 24; // 速度の色段階。同じ段階が続く区間は 1 本の線にまとめる
+
+function drawPath() {
+  trackLayer.clearLayers();
+  if (!D.nvalid) return;
+  const renderer = L.canvas({ padding: 0.5 });
+  const minDt = 1 / trackHz - 1e-6;
+  const kept = [];
+  const breaks = new Set(); // FIX が 3 秒より長く途切れた直後の点(間引き後の間隔ではなく、元のデータの欠測で判定する)
+  let lastValid = -1;
+  for (let i = 0; i < D.n; i++) {
+    if (!D.valid[i]) continue;
+    const gap = lastValid < 0 || D.t[i] - D.t[lastValid] > 3;
+    if (gap) breaks.add(i);
+    if (gap || D.t[i] - D.t[kept[kept.length - 1]] >= minDt) kept.push(i);
+    lastValid = i;
+  }
+  if (kept[kept.length - 1] !== lastValid) kept.push(lastValid);
+  const binOf = (v) => Math.min(BINS - 1, Math.floor(Math.max(0, v) / Math.max(D.vmax, 1) * BINS));
+  let run = null;
+  const flush = () => {
+    if (run && run.pts.length > 1) {
+      L.polyline(run.pts, { color: speedColor((run.bin + 0.5) / BINS * D.vmax, D.vmax), weight: 5, opacity: 0.9, renderer }).addTo(trackLayer);
+    }
+    run = null;
+  };
+  for (let k = 1; k < kept.length; k++) {
+    const p = kept[k - 1], i = kept[k];
+    if (breaks.has(i)) { flush(); continue; } // FIX が途切れていた区間は線で結ばない
+    const b = binOf(D.speed_kmh[i]);
+    if (run && run.bin === b) {
+      run.pts.push([D.lat[i], D.lon[i]]);
+    } else {
+      flush();
+      run = { bin: b, pts: [[D.lat[p], D.lon[p]], [D.lat[i], D.lon[i]]] };
+    }
+  }
+  flush();
+  const s0 = kept[0], e = kept[kept.length - 1];
+  L.circleMarker([D.lat[s0], D.lon[s0]], { radius: 6, color: '#fff', fillColor: '#32e678', fillOpacity: 1, weight: 2 }).bindTooltip('START').addTo(trackLayer);
+  L.circleMarker([D.lat[e], D.lon[e]], { radius: 6, color: '#fff', fillColor: '#ff4646', fillOpacity: 1, weight: 2 }).bindTooltip('END').addTo(trackLayer);
+}
+
 function drawTrack() {
   trackLayer.clearLayers();
   if (marker) { map.removeLayer(marker); marker = null; }
   if (!D.nvalid) { $('notice').textContent = '位置(3D FIX)が取れていないログです。地図は表示できません'; return; }
-  const renderer = L.canvas({ padding: 0.5 });
-  const pts = [];
-  for (let i = 0; i < D.n; i++) if (D.valid[i]) pts.push(i);
-  let prev = pts[0];
-  for (let k = 1; k < pts.length; k++) {
-    const i = pts[k];
-    const dt = D.t[i] - D.t[prev];
-    if (dt < 0.2 && k < pts.length - 1) continue; // 5Hz 程度に間引く
-    if (dt > 3) { prev = i; continue; } // FIX が途切れていた区間は線で結ばない
-    L.polyline([[D.lat[prev], D.lon[prev]], [D.lat[i], D.lon[i]]], { color: speedColor(D.speed_kmh[i], D.vmax), weight: 5, opacity: 0.9, renderer }).addTo(trackLayer);
-    prev = i;
-  }
-  L.circleMarker([D.lat[pts[0]], D.lon[pts[0]]], { radius: 6, color: '#fff', fillColor: '#32e678', fillOpacity: 1, weight: 2 }).bindTooltip('START').addTo(trackLayer);
-  const e = pts[pts.length - 1];
-  L.circleMarker([D.lat[e], D.lon[e]], { radius: 6, color: '#fff', fillColor: '#ff4646', fillOpacity: 1, weight: 2 }).bindTooltip('END').addTo(trackLayer);
+  drawPath();
   const icon = L.divIcon({
     className: '', iconSize: [28, 28], iconAnchor: [14, 14],
     html: '<svg class="arrow" viewBox="-14 -14 28 28"><path d="M0-11 L8 9 L0 5 L-8 9 Z" fill="#00cdff" stroke="#fff" stroke-width="2" stroke-linejoin="round"/></svg>',
   });
-  marker = L.marker([D.lat[pts[0]], D.lon[pts[0]]], { icon, interactive: false, keyboard: false, zIndexOffset: 1000 }).addTo(map);
+  marker = L.marker([D.lat[D.firstValid], D.lon[D.firstValid]], { icon, interactive: false, keyboard: false, zIndexOffset: 1000 }).addTo(map);
   fitTrack();
+}
+
+function clearView() {
+  trackLayer.clearLayers();
+  if (marker) { map.removeLayer(marker); marker = null; }
+  for (const id of ['g', 'acc', 'hdg', 'alt', 'gps', 'hacc', 'yaw', 'batt', 'clock']) $(id).textContent = '--';
+  $('speed').firstChild.nodeValue = '--';
+  $('gbar').style.width = '0';
+  $('pos').textContent = '0:00 / 0:00';
+  $('seek').max = 0; $('seek').value = 0;
+  $('vmax').textContent = '-- km/h';
+  $('meta').textContent = 'CSV を選ぶか、ここにドロップしてください';
+  layoutChart();
+  drawCursor(0);
 }
 
 function fitTrack() {
@@ -128,11 +185,11 @@ function jst(utc) {
 
 function upperBound(arr, x) { let lo = 0, hi = arr.length; while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m] <= x) lo = m + 1; else hi = m; } return lo; }
 
-let heading = 0;
+let arrowRot = 0; // 矢印の累積角度(北をまたいでも逆回りに一周しないよう、差を ±180° に畳んで足す)
 function show(T) {
   if (!D) return;
   const i = Math.max(0, upperBound(D.t, T) - 1);
-  const pi = D.posIdx[i];
+  const pi = D.posIdx[i] >= 0 ? D.posIdx[i] : D.firstValid; // FIX 前は最初の有効位置に置く
   const fix3 = D.fix[i] === 3;
   $('speed').firstChild.nodeValue = fix3 ? Math.round(D.speed_kmh[i]) : '--';
   $('clock').textContent = jst(D.utc[i]) || '--';
@@ -145,7 +202,7 @@ function show(T) {
   $('yaw').textContent = D.gyro_z[i].toFixed(1) + ' °/s';
   const braw = D.battRaw[i];
   $('batt').textContent = braw.includes('.') ? `${(+braw).toFixed(1)} V` : `${braw} %` + (D.charging[i] ? ' 充電中' : '');
-  if (fix3 && D.speed_kmh[i] > 2) heading = D.heading_deg[i];
+  const heading = D.hd[i];
   $('hdg').textContent = fix3 ? `${Math.round(heading)}°` : '--';
   $('pos').textContent = `${fmtT(T)} / ${fmtT(D.duration)}`;
   $('seek').value = T;
@@ -153,7 +210,8 @@ function show(T) {
     const ll = [D.lat[pi], D.lon[pi]];
     marker.setLatLng(ll);
     const el = marker.getElement()?.firstChild;
-    if (el) el.style.transform = `rotate(${heading}deg)`;
+    arrowRot += ((heading - arrowRot) % 360 + 540) % 360 - 180;
+    if (el) el.style.transform = `rotate(${arrowRot}deg)`;
     if ($('follow').checked && !map.getBounds().pad(-0.3).contains(ll)) map.panTo(ll, { animate: false });
   }
   drawCursor(T);
@@ -179,12 +237,18 @@ function layoutChart() {
     c.strokeStyle = color; c.lineWidth = 1.5; c.beginPath();
     let started = false;
     const step = Math.max(1, Math.floor(D.n / (w * 2)));
+    const yOf = (v) => y1 - Math.min(1, v / max) * (y1 - y0);
     for (let i = 0; i < D.n; i += step) {
-      const v = arr[i];
-      if (!isFinite(v)) { started = false; continue; }
+      // 間引くときも区間の最小・最大を残す(短いピークが消えないように)
+      let lo = Infinity, hi = -Infinity;
+      for (let j = i; j < Math.min(D.n, i + step); j++) {
+        const v = arr[j];
+        if (isFinite(v)) { if (v < lo) lo = v; if (v > hi) hi = v; }
+      }
+      if (lo === Infinity) { started = false; continue; }
       const x = padL + (D.t[i] / D.duration) * (w - padL - padR);
-      const y = y1 - Math.min(1, v / max) * (y1 - y0);
-      if (!started) { c.moveTo(x, y); started = true; } else c.lineTo(x, y);
+      if (!started) { c.moveTo(x, yOf(lo)); started = true; } else c.lineTo(x, yOf(lo));
+      if (hi !== lo) c.lineTo(x, yOf(hi));
     }
     c.stroke();
   };
@@ -254,6 +318,7 @@ function load(text, name) {
     D = build(parseCsv(text), name);
   } catch (e) {
     D = null;
+    clearView();
     $('notice').textContent = e.message;
     return;
   }
@@ -262,7 +327,7 @@ function load(text, name) {
   if (!D.hasG) $('notice').textContent = '静止区間が無いため、G は表示しません';
   $('vmax').textContent = `${Math.round(D.vmax)} km/h`;
   $('seek').max = D.duration;
-  heading = 0;
+  arrowRot = D.hd[0];
   T = 0;
   drawTrack();
   layoutChart();
@@ -285,7 +350,14 @@ async function loadServer(name) {
   }
 }
 $('files').onchange = (e) => e.target.value && loadServer(e.target.value);
-$('pick').onchange = async (e) => { const f = e.target.files[0]; if (f) load(await f.text(), f.name); };
+// await 中に別のファイルが選ばれたら、遅れて解決した古い方は捨てる
+async function loadFile(f) {
+  const seq = ++loadSeq;
+  const text = await f.text();
+  if (seq === loadSeq) load(text, f.name);
+}
+$('pick').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) loadFile(f); };
+$('density').onchange = (e) => { trackHz = +e.target.value; if (D && D.nvalid) drawPath(); };
 
 let dragDepth = 0;
 addEventListener('dragenter', (e) => { e.preventDefault(); dragDepth++; $('drop').style.display = 'flex'; });
@@ -294,13 +366,13 @@ addEventListener('dragover', (e) => e.preventDefault());
 addEventListener('drop', async (e) => {
   e.preventDefault(); dragDepth = 0; $('drop').style.display = 'none';
   const f = e.dataTransfer.files[0];
-  if (f) load(await f.text(), f.name);
+  if (f) loadFile(f);
 });
 
 (async function init() {
   const files = await (await fetch('/api/files')).json();
   const sel = $('files');
-  sel.innerHTML = '<option value="">logs/ から選ぶ…</option>' + files.map((f) => `<option value="${f.name}">${f.name} (${(f.size / 1024).toFixed(0)} KB)</option>`).join('');
+  sel.replaceChildren(new Option('logs/ から選ぶ…', ''), ...files.map((f) => new Option(`${f.name} (${(f.size / 1024).toFixed(0)} KB)`, f.name)));
   layoutChart();
   // 実走ログ(最も大きい CSV)があれば最初に開く。無ければ先頭
   const pick = files.slice().sort((a, b) => b.size - a.size)[0];
