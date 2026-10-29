@@ -20,6 +20,7 @@ struct Status {
   char ssid[33];
   uint32_t dataPackets;  // RaceBox data messages received since boot
   uint32_t udpErrors;
+  uint8_t rec;           // SD log: 0 none, 1 recording, 2 saving (do not remove), 3 safe to remove, 4 failed (full / error)
 
   // Latest RaceBox data message; meaningful when dataAtUs != 0.
   int64_t dataAtUs;      // esp_timer_get_time() of the last message, 0 = none yet
@@ -43,5 +44,9 @@ struct Status {
 void frontendStart();
 // Called whenever the bridge state or a RaceBox message changes (cheap; may be called 25+ times/s).
 void frontendUpdate(const Status& s);
+
+// Implemented by the bridge, called by a frontend when the user long-presses its button: stops the SD
+// recording and makes the card safe to remove; from that state, starts recording again.
+void onLongPress();
 
 }  // namespace bridge
