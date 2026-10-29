@@ -36,6 +36,68 @@ function parseCsv(text) {
   return rows;
 }
 
+// ---- 停止の判定(ゼロ速度更新) ----
+// GPS の位置は、完全に止まっていても数十 m ふらつき、速度も時々跳ねる。一方、加速度とジャイロが静かな間は
+// 速度が変わらない(加速度が無い)。そこで、IMU が静かな区間を見つけ、その間の GPS 速度の中央値がほぼ 0
+// なら「動いていない」と判定して、位置を区間の中央値に固定、速度を 0 にする。
+// 一定速度の巡航も IMU は静かなので、GPS 速度(中央値 2 km/h 未満)も条件にしている。
+const STILL_ACC = 0.04;  // G。静止時の加速度(基準)からの差
+const STILL_GYRO = 3;    // deg/s。静止時のジャイロ(バイアス)からの差
+const STILL_MIN = 2;     // 秒。IMU が静かな状態がこれ以上続いたら候補
+const STILL_MEDIAN = 2;  // km/h。区間の GPS 速度の中央値
+const STILL_P90 = 3;     // km/h。同じく 90 パーセンタイル(跳ねの許容)
+let stillOn = true;
+
+const median = (a) => { const b = Float64Array.from(a).sort(); return b[b.length >> 1]; };
+const percentile = (a, p) => { const b = Float64Array.from(a).sort(); return b[Math.min(b.length - 1, Math.floor(b.length * p))]; };
+
+function computeStill(d) {
+  d.still = new Uint8Array(d.n);
+  d.rLat = d.lat; d.rLon = d.lon; d.rSpeed = d.speed_kmh; // 元の値
+  d.fLat = Float64Array.from(d.lat); d.fLon = Float64Array.from(d.lon); d.fSpeed = Float64Array.from(d.speed_kmh);
+  d.stillRuns = 0; d.stillSec = 0;
+  if (!d.hasG) return;
+  const quiet = new Uint8Array(d.n);
+  for (let i = 0; i < d.n; i++) {
+    const sg = d._segs[d._segOf[i]];
+    const dyn = vlen(vsub(accAt(d, i), sg.ref));
+    const gy = vlen([d.gyro_x[i] - sg.gbias[0], d.gyro_y[i] - sg.gbias[1], d.gyro_z[i] - sg.gbias[2]]);
+    if (dyn < STILL_ACC && gy < STILL_GYRO) quiet[i] = 1; // NaN は偽になる
+  }
+  for (let i = 0; i < d.n;) {
+    if (!quiet[i]) { i++; continue; }
+    let j = i; // 0.3 秒までの切れ目は同じ区間として続ける
+    for (let k = i + 1; k < d.n && d.t[k] - d.t[j] <= 0.3; k++) if (quiet[k]) j = k;
+    if (d.t[j] - d.t[i] >= STILL_MIN) {
+      const sp = [], la = [], lo = [];
+      for (let k = i; k <= j; k++) {
+        if (d.fix[k] === 3 && isFinite(d.speed_kmh[k])) sp.push(d.speed_kmh[k]);
+        if (d.valid[k]) { la.push(d.lat[k]); lo.push(d.lon[k]); }
+      }
+      // GPS の速度が十分あって(行の 1/4 以上)、中央値が 0 に近いときだけ停止とする(FIX が無いと一定速度の巡航と区別できない)
+      if (sp.length >= Math.max(10, (j - i + 1) / 4) && median(sp) < STILL_MEDIAN && percentile(sp, 0.9) < STILL_P90 && la.length) {
+        const ma = median(la), mo = median(lo);
+        for (let k = i; k <= j; k++) {
+          d.still[k] = 1;
+          d.fSpeed[k] = 0;
+          if (d.valid[k]) { d.fLat[k] = ma; d.fLon[k] = mo; }
+        }
+        d.stillRuns++; d.stillSec += d.t[j] - d.t[i];
+      }
+    }
+    i = j + 1;
+  }
+}
+
+function applyStill(d, on) {
+  d.lat = on ? d.fLat : d.rLat;
+  d.lon = on ? d.fLon : d.rLon;
+  d.speed_kmh = on ? d.fSpeed : d.rSpeed;
+  d.vmax = 0;
+  for (let i = 0; i < d.n; i++) if (d.valid[i]) d.vmax = Math.max(d.vmax, d.speed_kmh[i]);
+}
+
+
 // ---- 走行距離 ----
 function haversine(lat1, lon1, lat2, lon2) {
   const R = 6371008.8, r = Math.PI / 180;
@@ -362,6 +424,8 @@ function build(rows, name) {
   const firstHd = d.hd.find((v) => isFinite(v)) ?? 0;
   for (let i = 0; i < n && !isFinite(d.hd[i]); i++) d.hd[i] = firstHd;
   computeG(d);
+  computeStill(d);
+  applyStill(d, stillOn);
   analyzeGaps(d);
   computeDistance(d, gapInertial);
   return d;
@@ -452,7 +516,7 @@ function clearView() {
   for (const id of ['g', 'acc', 'hdg', 'alt', 'gps', 'hacc', 'yaw', 'batt', 'clock']) $(id).textContent = '--';
   $('speed').firstChild.nodeValue = '--';
   $('gbar').style.width = '0';
-  $('dist').textContent = '--'; $('fblr').textContent = '--'; $('gapinfo').textContent = '--';
+  $('dist').textContent = '--'; $('fblr').textContent = '--'; $('gapinfo').textContent = '--'; $('stillinfo').textContent = '--';
   $('pos').textContent = '0:00 / 0:00';
   $('seek').max = 0; $('seek').value = 0;
   $('vmax').textContent = '-- km/h';
@@ -652,6 +716,7 @@ function load(text, name) {
   else if (!D.hasAxes) $('notice').textContent = '直進での加減速が足りないため、前後 / 左右には分けません(合成 G のみ)';
   $('vmax').textContent = `${Math.round(D.vmax)} km/h`;
   updateGapInfo();
+  updateStillInfo();
   $('seek').max = D.duration;
   arrowRot = D.hd[0];
   T = 0;
@@ -692,8 +757,22 @@ function updateGapInfo() {
 function refreshDistance() {
   computeDistance(D, gapInertial);
   updateGapInfo();
-  $('meta').textContent = $('meta').textContent.replace(/ \/ [\d.,]+ (m|km)(?= \/|$)/, ` / ${fmtKm(D.distance)}`);
+  $('meta').textContent = $('meta').textContent.replace(/最高 \d+ km\/h \/ [\d.,]+ (m|km)/, `最高 ${Math.round(D.vmax)} km/h / ${fmtKm(D.distance)}`);
+  $('vmax').textContent = `${Math.round(D.vmax)} km/h`;
 }
+function updateStillInfo() {
+  $('stillinfo').textContent = !D ? '--' : D.hasG ? (D.stillRuns ? `${D.stillRuns} 回 / ${D.stillSec.toFixed(0)} 秒` : 'なし') : '静止区間なし(判定不可)';
+}
+$('still').onchange = (e) => {
+  stillOn = e.target.checked;
+  if (!D) return;
+  applyStill(D, stillOn);
+  analyzeGaps(D);
+  refreshDistance();
+  layoutChart();
+  if (D.nvalid) { drawPath(); }
+  show(T);
+};
 $('gapmode').onchange = (e) => {
   gapInertial = e.target.value === 'inertial';
   if (!D) return;

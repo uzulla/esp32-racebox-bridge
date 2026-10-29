@@ -60,6 +60,7 @@
     <canvas id="ball" title="G ボール(円は 0.5G ごと、赤い円が 1G。上 = 加速)"></canvas>
     <dl>
       <dt>走行距離</dt><dd id="dist">--</dd>
+      <dt>停止と判定</dt><dd id="stillinfo">--</dd>
       <dt>GPS 途切れ</dt><dd id="gapinfo">--</dd>
       <dt>G (重力除く)</dt><dd id="g">--</dd>
       <dt>前後 / 左右</dt><dd id="fblr">--</dd>
@@ -73,6 +74,7 @@
     </dl>
     <div class="legend"><span>0</span><i></i><span id="vmax">-- km/h</span></div>
     <p style="margin-top:16px"><label><input type="checkbox" id="follow" checked> 現在地を追う</label><br>
+    <label title="加速度とジャイロが静かで、GPS の速度もほぼ 0 の間は、位置のふらつき(ドリフト)を消して一点に固定し、速度を 0 にします"><input type="checkbox" id="still" checked> 停止中は位置を固定</label><br>
     <label>途切れの補完 <select id="gapmode" title="GPS が 1 秒より長く途切れた区間の距離と道筋の出し方"><option value="inertial" selected>慣性(加速度+ジャイロ)</option><option value="line">直線</option></select></label><br>
     <label>軌跡の細かさ <select id="density" title="高くすると長いログで描画が重くなります"><option value="0.1">0.1 Hz (10秒に1点)</option><option value="0.2">0.2 Hz</option><option value="0.5">0.5 Hz</option><option value="1">1 Hz</option><option value="2" selected>2 Hz</option><option value="5">5 Hz</option><option value="10">10 Hz</option><option value="25">25 Hz</option></select></label><br>
     <button id="fit" style="margin-top:6px">全体を表示</button></p>
