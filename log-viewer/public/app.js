@@ -43,28 +43,149 @@ function haversine(lat1, lon1, lat2, lon2) {
   return 2 * R * Math.asin(Math.sqrt(a));
 }
 
-// 速度(ドップラー)を時間で積分する。位置の差を足すと、静止中の GPS のゆらぎが距離として積もるため。
-// FIX が 1 秒より長く途切れた区間は、前後の有効な位置の直線距離で埋める(異常に速くなるときは足さない)。
-function computeDistance(d) {
+// 速度(ドップラー)を時間で積分する。位置の差を足すと、停止中の GPS のゆらぎが距離として積もるため。
+// FIX が GAP_MIN 秒より長く途切れた区間(gap)は、analyzeGaps() で補完した距離を足す。
+const GAP_MIN = 1;  // これより長く位置が無ければ「途切れ」
+const GAP_MAX = 60; // これより長い途切れは補完しない(距離にも足さない)
+let gapInertial = true; // 途切れの補完: true = 慣性(加速度 + ジャイロ)、false = 直線
+
+function computeDistance(d, useInertial) {
   d.cum = new Float64Array(d.n);
+  const gapAt = new Map(d.gaps.map((g) => [g.b, g]));
   let total = 0, last = -1;
   for (let i = 0; i < d.n; i++) {
     if (d.valid[i]) {
       if (last >= 0) {
         const dt = d.t[i] - d.t[last];
-        if (dt <= 1) {
+        if (dt <= GAP_MIN) {
           const v = (d.speed_kmh[i] + d.speed_kmh[last]) / 2;
           if (v >= 1) total += v / 3.6 * dt; // 1 km/h 未満は止まっているとみなす
         } else {
-          const m = haversine(d.lat[last], d.lon[last], d.lat[i], d.lon[i]);
-          if (m / dt < 100) total += m; // 360 km/h 超は FIX の飛びとみなす
+          const g = gapAt.get(i);
+          if (g && !g.skipped) total += (useInertial && g.inertial ? g.inertial : g.line).dist;
         }
       }
       last = i;
     }
     d.cum[i] = total;
   }
+  for (const g of d.gaps) { // 途切れの間の行は、時間に比例して配る
+    for (let r = g.a + 1; r < g.b; r++) d.cum[r] = d.cum[g.a] + (d.cum[g.b] - d.cum[g.a]) * (d.t[r] - d.t[g.a]) / (d.t[g.b] - d.t[g.a]);
+  }
   d.distance = total;
+}
+
+// ---- 途切れの補完 ----
+// 直線: 前後の位置を結ぶ(道のりの下限)。
+// 慣性: 途切れる直前の速度 / 向きから、前後の加速度(G の前後成分)とジャイロのヨーを積分して道筋を作る。
+//   積分のずれは、途切れの前後に GPS で分かっている速度 / 向き / 位置に合うよう線形に補正する(境界条件)。
+const wrap180 = (x) => ((x % 360) + 540) % 360 - 180;
+const K_ENU = 6371008.8 * Math.PI / 180;
+const toEnu = (lat0, lon0, lat, lon) => [(lon - lon0) * K_ENU * Math.cos(lat0 * Math.PI / 180), (lat - lat0) * K_ENU];
+const fromEnu = (lat0, lon0, x, y) => [lat0 + y / K_ENU, lon0 + x / (K_ENU * Math.cos(lat0 * Math.PI / 180))];
+
+// ジャイロのヨー角速度(deg/s、上向き軸まわり、静止時のバイアスを引く)
+function yawRate(d, i) {
+  const sg = d._segs[d._segOf[i]];
+  const u = vunit(sg.ref);
+  const w = (d.gyro_x[i] - sg.gbias[0]) * u[0] + (d.gyro_y[i] - sg.gbias[1]) * u[1] + (d.gyro_z[i] - sg.gbias[2]) * u[2];
+  return isFinite(w) ? w : NaN;
+}
+
+// ジャイロの向き(符号)を、走行中の GPS の方位変化と比べて決める。曲がった区間が足りなければ 0(不明)
+function estimateYawSign(d) {
+  if (!d.hasG) return 0;
+  const k = d._k;
+  let S = 0, cnt = 0;
+  for (let i = k; i < d.n - k; i++) {
+    if (!d.valid[i - k] || !d.valid[i + k] || d.speed_kmh[i] < 8) continue;
+    const span = d.t[i + k] - d.t[i - k];
+    if (span <= 0 || span > 1.5) continue;
+    const rc = wrap180(d.heading_deg[i + k] - d.heading_deg[i - k]) / span; // 方位(時計回りが正)の変化 deg/s
+    const w = yawRate(d, i);
+    if (!isFinite(rc + w) || Math.abs(w) < 3) continue;
+    S += rc * w; cnt++;
+  }
+  return cnt < 25 ? 0 : (S < 0 ? 1 : -1); // rc ≈ -σ·w
+}
+
+function inertialGap(d, a, b, sigma) {
+  const ta = d.t[a], tb = d.t[b];
+  const idx = [a];
+  for (let k = a + 1; k < b; k++) if (isFinite(d.fb[k])) idx.push(k);
+  idx.push(b);
+  const m = idx.length;
+  if (m < 4) return null; // 途切れの間の行が(通信切れなどで)無い
+  const T = idx.map((k) => d.t[k]);
+  const G = 9.80665;
+  const af = (k) => (isFinite(d.fb[k]) ? d.fb[k] * G : 0);
+  // 速度: 前後加速度を積分し、復帰時の GPS 速度に合うよう線形に補正
+  const v = new Float64Array(m);
+  v[0] = d.speed_kmh[a] / 3.6;
+  for (let j = 1; j < m; j++) v[j] = v[j - 1] + 0.5 * (af(idx[j - 1]) + af(idx[j])) * (T[j] - T[j - 1]);
+  const e = d.speed_kmh[b] / 3.6 - v[m - 1];
+  for (let j = 0; j < m; j++) v[j] = Math.max(0, v[j] + e * (T[j] - ta) / (tb - ta));
+  // 向き(方位 deg、時計回り): ジャイロの積分を、前後の GPS の方位に合うよう線形に補正
+  const psi = new Float64Array(m);
+  psi[0] = d.hd[a];
+  const movingEnds = d.speed_kmh[a] > 2 && d.speed_kmh[b] > 2;
+  const haveYaw = sigma !== 0 && idx.every((k) => k === a || k === b || isFinite(yawRate(d, k)));
+  if (haveYaw) {
+    for (let j = 1; j < m; j++) {
+      const w0 = isFinite(yawRate(d, idx[j - 1])) ? yawRate(d, idx[j - 1]) : 0, w1 = isFinite(yawRate(d, idx[j])) ? yawRate(d, idx[j]) : 0;
+      psi[j] = psi[j - 1] - sigma * 0.5 * (w0 + w1) * (T[j] - T[j - 1]);
+    }
+    if (movingEnds) {
+      const raw = psi[m - 1] - psi[0];
+      const corr = raw + wrap180(d.hd[b] - d.hd[a] - raw) - raw; // 目標との差(360° の周回は raw 側に任せる)
+      for (let j = 0; j < m; j++) psi[j] += corr * (T[j] - ta) / (tb - ta);
+    }
+  } else {
+    const dpsi = movingEnds ? wrap180(d.hd[b] - d.hd[a]) : 0; // ジャイロが無ければ、方位を直線的に変える
+    for (let j = 0; j < m; j++) psi[j] = psi[0] + dpsi * (T[j] - ta) / (tb - ta);
+  }
+  // 位置: 速度と向きを積分(a を原点の東・北 m)
+  const P = [[0, 0]];
+  const S = [0];
+  for (let j = 1; j < m; j++) {
+    const dt = T[j] - T[j - 1], vm = (v[j - 1] + v[j]) / 2;
+    const pm = (psi[j - 1] + psi[j]) / 2 * Math.PI / 180;
+    const dx = vm * dt * Math.sin(pm), dy = vm * dt * Math.cos(pm);
+    P.push([P[j - 1][0] + dx, P[j - 1][1] + dy]);
+    S.push(S[j - 1] + Math.hypot(dx, dy));
+  }
+  const L = S[m - 1];
+  const end = toEnu(d.lat[a], d.lon[a], d.lat[b], d.lon[b]);
+  const r = [end[0] - P[m - 1][0], end[1] - P[m - 1][1]];
+  if (Math.hypot(r[0], r[1]) > 0.5 * L + 30) return null; // 積分が復帰位置と合わない = 信用しない(直線に戻す)
+  for (let j = 0; j < m; j++) { // 復帰位置に合うよう、進んだ距離に比例して補正
+    const f = L > 1e-6 ? S[j] / L : (T[j] - ta) / (tb - ta);
+    P[j] = [P[j][0] + r[0] * f, P[j][1] + r[1] * f];
+  }
+  let dist = 0;
+  for (let j = 1; j < m; j++) dist += Math.hypot(P[j][0] - P[j - 1][0], P[j][1] - P[j - 1][1]);
+  return { dist, pts: P.map((p) => fromEnu(d.lat[a], d.lon[a], p[0], p[1])) };
+}
+
+function analyzeGaps(d) {
+  d.gaps = [];
+  d.gapSec = 0;
+  d.skippedSec = 0;
+  const sigma = estimateYawSign(d);
+  let last = -1;
+  for (let i = 0; i < d.n; i++) {
+    if (!d.valid[i]) continue;
+    if (last >= 0 && d.t[i] - d.t[last] > GAP_MIN) {
+      const dt = d.t[i] - d.t[last];
+      const line = haversine(d.lat[last], d.lon[last], d.lat[i], d.lon[i]);
+      const g = { a: last, b: i, dt, skipped: dt > GAP_MAX || line / dt >= 100, // 360 km/h 超は FIX の飛び
+        line: { dist: line, pts: [[d.lat[last], d.lon[last]], [d.lat[i], d.lon[i]]] }, inertial: null };
+      if (g.skipped) d.skippedSec += dt;
+      else { d.gapSec += dt; g.inertial = d.hasAxes ? inertialGap(d, last, i, sigma) : null; }
+      d.gaps.push(g);
+    }
+    last = i;
+  }
 }
 
 // ---- G ----
@@ -98,7 +219,11 @@ function findStationary(d) {
       const ref = vscale(m, 1 / cnt);
       let dev = 0; // 手で持って動かしているなど、揺れている区間は基準にしない
       for (let k = a; k <= b; k++) dev = Math.max(dev, vlen(vsub(accAt(d, k), ref)));
-      if (dev < 0.06 && Math.abs(vlen(ref) - 1) < 0.1) segs.push({ a, b, t0: d.t[a], t1: d.t[b], ref });
+      if (dev < 0.06 && Math.abs(vlen(ref) - 1) < 0.1) {
+        const gb = [0, 0, 0]; // 静止中のジャイロの読み = バイアス(慣性補完で引く)
+        for (let k = a; k <= b; k++) { gb[0] += d.gyro_x[k]; gb[1] += d.gyro_y[k]; gb[2] += d.gyro_z[k]; }
+        segs.push({ a, b, t0: d.t[a], t1: d.t[b], ref, gbias: vscale(gb, 1 / cnt) });
+      }
     }
     i = j + 1;
   }
@@ -118,6 +243,7 @@ function computeG(d) {
 
   const segs = findStationary(d);
   d.segCount = segs.length;
+  d._segs = segs;
   if (!segs.length) return; // 基準が取れないと G は出せない(走行中の加速度を基準にすると狂う)
   d.hasG = true;
 
@@ -129,6 +255,7 @@ function computeG(d) {
     const dist = (s) => Math.max(0, s.t0 - d.t[i], d.t[i] - s.t1);
     segOf[i] = p + 1 < segs.length && dist(segs[p + 1]) < dist(segs[p]) ? p + 1 : p;
   }
+  d._segOf = segOf;
   // 取り付けが同じとみなせる区間をまとめる(基準ベクトルが近い)。傾斜での停止程度の差(約 8°)は同じ取り付けとみなす
   const groups = [];
   const groupOf = segs.map((s) => {
@@ -155,6 +282,7 @@ function computeG(d) {
   for (let i = 1; i < n; i += Math.max(1, Math.floor(n / 200))) dts.push(d.t[i] - d.t[i - 1]);
   dts.sort((x, y) => x - y);
   const k = Math.max(1, Math.round(0.4 / Math.max(0.005, dts[dts.length >> 1] || 0.04)));
+  d._k = k;
   const v = Float64Array.from({ length: n }, (_, i) => (d.fix[i] === 3 ? d.speed_kmh[i] / 3.6 : NaN));
   const al = new Float64Array(n).fill(NaN);
   for (let i = k; i < n - k; i++) {
@@ -233,8 +361,9 @@ function build(rows, name) {
   }
   const firstHd = d.hd.find((v) => isFinite(v)) ?? 0;
   for (let i = 0; i < n && !isFinite(d.hd[i]); i++) d.hd[i] = firstHd;
-  computeDistance(d);
   computeG(d);
+  analyzeGaps(d);
+  computeDistance(d, gapInertial);
   return d;
 }
 
@@ -258,13 +387,17 @@ function drawPath() {
   const renderer = L.canvas({ padding: 0.5 });
   const minDt = 1 / trackHz - 1e-6;
   const kept = [];
-  const breaks = new Set(); // FIX が 3 秒より長く途切れた直後の点(間引き後の間隔ではなく、元のデータの欠測で判定する)
+  const breaks = new Set(); // 途切れ(GAP_MIN 秒超)の直後の点。間引き後の間隔ではなく、元のデータで判定する
   let lastValid = -1;
   for (let i = 0; i < D.n; i++) {
     if (!D.valid[i]) continue;
-    const gap = lastValid < 0 || D.t[i] - D.t[lastValid] > 3;
-    if (gap) breaks.add(i);
-    if (gap || D.t[i] - D.t[kept[kept.length - 1]] >= minDt) kept.push(i);
+    if (lastValid < 0 || D.t[i] - D.t[lastValid] > GAP_MIN) {
+      breaks.add(i);
+      if (lastValid >= 0 && kept[kept.length - 1] !== lastValid) kept.push(lastValid); // 途切れの手前の点も残す
+      kept.push(i);
+    } else if (D.t[i] - D.t[kept[kept.length - 1]] >= minDt) {
+      kept.push(i);
+    }
     lastValid = i;
   }
   if (kept[kept.length - 1] !== lastValid) kept.push(lastValid);
@@ -278,7 +411,7 @@ function drawPath() {
   };
   for (let k = 1; k < kept.length; k++) {
     const p = kept[k - 1], i = kept[k];
-    if (breaks.has(i)) { flush(); continue; } // FIX が途切れていた区間は線で結ばない
+    if (breaks.has(i)) { flush(); continue; } // 途切れた区間は実線で結ばない(下で点線の補完線を引く)
     const b = binOf(D.speed_kmh[i]);
     if (run && run.bin === b) {
       run.pts.push([D.lat[i], D.lon[i]]);
@@ -288,6 +421,13 @@ function drawPath() {
     }
   }
   flush();
+  for (const g of D.gaps) { // 途切れ: 補完した道筋を点線で
+    const est = gapInertial && g.inertial ? g.inertial : g.line;
+    const how = gapInertial && g.inertial ? '慣性' : '直線';
+    L.polyline(est.pts, { color: g.skipped ? '#8591b0' : '#ffb000', weight: 3, opacity: 0.9, dashArray: '6 8', renderer })
+      .bindTooltip(g.skipped ? `GPS 途切れ ${g.dt.toFixed(0)} 秒(補完しない)` : `GPS 途切れ ${g.dt.toFixed(0)} 秒 / ${how}で補完 ${est.dist.toFixed(0)} m`)
+      .addTo(trackLayer);
+  }
   const s0 = kept[0], e = kept[kept.length - 1];
   L.circleMarker([D.lat[s0], D.lon[s0]], { radius: 6, color: '#fff', fillColor: '#32e678', fillOpacity: 1, weight: 2 }).bindTooltip('START').addTo(trackLayer);
   L.circleMarker([D.lat[e], D.lon[e]], { radius: 6, color: '#fff', fillColor: '#ff4646', fillOpacity: 1, weight: 2 }).bindTooltip('END').addTo(trackLayer);
@@ -312,7 +452,7 @@ function clearView() {
   for (const id of ['g', 'acc', 'hdg', 'alt', 'gps', 'hacc', 'yaw', 'batt', 'clock']) $(id).textContent = '--';
   $('speed').firstChild.nodeValue = '--';
   $('gbar').style.width = '0';
-  $('dist').textContent = '--'; $('fblr').textContent = '--';
+  $('dist').textContent = '--'; $('fblr').textContent = '--'; $('gapinfo').textContent = '--';
   $('pos').textContent = '0:00 / 0:00';
   $('seek').max = 0; $('seek').value = 0;
   $('vmax').textContent = '-- km/h';
@@ -511,6 +651,7 @@ function load(text, name) {
   if (!D.hasG) $('notice').textContent = '静止区間が無いため、G は表示しません';
   else if (!D.hasAxes) $('notice').textContent = '直進での加減速が足りないため、前後 / 左右には分けません(合成 G のみ)';
   $('vmax').textContent = `${Math.round(D.vmax)} km/h`;
+  updateGapInfo();
   $('seek').max = D.duration;
   arrowRot = D.hd[0];
   T = 0;
@@ -542,6 +683,24 @@ async function loadFile(f) {
   if (seq === loadSeq) load(text, f.name);
 }
 $('pick').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) loadFile(f); };
+function updateGapInfo() {
+  if (!D) { $('gapinfo').textContent = '--'; return; }
+  const n = D.gaps.length;
+  const inert = D.gaps.filter((g) => g.inertial).length;
+  $('gapinfo').textContent = n ? `${n} 回 / ${D.gapSec.toFixed(0)} 秒` + (gapInertial ? ` (慣性 ${inert})` : '') + (D.skippedSec ? ` +補完なし ${D.skippedSec.toFixed(0)} 秒` : '') : 'なし';
+}
+function refreshDistance() {
+  computeDistance(D, gapInertial);
+  updateGapInfo();
+  $('meta').textContent = $('meta').textContent.replace(/ \/ [\d.,]+ (m|km)(?= \/|$)/, ` / ${fmtKm(D.distance)}`);
+}
+$('gapmode').onchange = (e) => {
+  gapInertial = e.target.value === 'inertial';
+  if (!D) return;
+  refreshDistance();
+  if (D.nvalid) drawPath();
+  show(T);
+};
 $('density').onchange = (e) => { trackHz = +e.target.value; if (D && D.nvalid) drawPath(); };
 
 let dragDepth = 0;
