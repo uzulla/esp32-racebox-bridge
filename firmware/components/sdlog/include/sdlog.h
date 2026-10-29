@@ -3,8 +3,9 @@
 // RACEBOX_SDLOG (the C6-GEEK) have a card slot; elsewhere every call below does nothing.
 //
 // Recording starts by itself at boot if a card is present. No card, a card that cannot be mounted
-// (exFAT, ...) or a full / failing card means no recording, and it is never retried. A long press of
-// the button stops recording and unmounts the card: once state() is Safe the card may be removed.
+// (exFAT, ...) or a full / failing card means no recording, and nothing is retried by itself. A long
+// press of the button stops recording and unmounts the card (once state() is Safe it may be removed);
+// a long press in any other state tries to start recording.
 #pragma once
 
 #include <stdint.h>
@@ -28,7 +29,8 @@ void init();
 void write(const racebox::Data& d, bool micro);
 // Stops recording and unmounts the card (returns at once; state() goes Saving, then Safe).
 void requestStop();
-// From Safe: mounts the card again and records to the next file (log_<session>_02.csv, ...).
+// From Safe, Failed or Off (no card at boot): mounts the card and records to the next file
+// (log_<session>_02.csv, ...). This is how a card inserted later, or after SD ERR, is used.
 void requestStart();
 State state();
 

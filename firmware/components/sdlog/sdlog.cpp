@@ -236,6 +236,8 @@ bool startLogging() {
     return false;
   }
   gStop = false;
+  Item stale;
+  while (xQueueReceive(gQueue, &stale, 0) == pdTRUE) {}
   gState = State::Rec;
   xTaskCreate(logTask, "sdlog", 6144, nullptr, 4, nullptr);
   ESP_LOGI(TAG, "recording to %s", gPath);
@@ -245,6 +247,7 @@ bool startLogging() {
 // Mounting takes a while, so restarting runs in its own task (the caller is the LCD task).
 void restartTask(void*) {
   if (mountCard()) {
+    if (!gSession) gSession = pickSession();
     startLogging();
   } else {
     gState = State::Failed;
@@ -257,9 +260,9 @@ void restartTask(void*) {
 
 void init() {
   if (!initBus()) return;
-  if (!mountCard()) return;
-  gSession = pickSession();
   gQueue = xQueueCreate(kQueueLen, sizeof(Item));
+  if (!mountCard()) return;  // no card now: a long press tries again later
+  gSession = pickSession();
   startLogging();
 }
 
@@ -275,8 +278,10 @@ void requestStop() {
 }
 
 void requestStart() {
+  const State st = gState;
+  if (st == State::Rec || st == State::Saving || !gQueue) return;
   bool idle = false;
-  if (gState == State::Safe && gStarting.compare_exchange_strong(idle, true)) {
+  if (gStarting.compare_exchange_strong(idle, true)) {
     xTaskCreate(restartTask, "sdlog_start", 4096, nullptr, 4, nullptr);
   }
 }
