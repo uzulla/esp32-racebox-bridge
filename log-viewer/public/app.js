@@ -216,10 +216,18 @@ function inertialGap(d, a, b, sigma) {
     P.push([P[j - 1][0] + dx, P[j - 1][1] + dy]);
     S.push(S[j - 1] + Math.hypot(dx, dy));
   }
-  const L = S[m - 1];
   const end = toEnu(d.lat[a], d.lon[a], d.lat[b], d.lon[b]);
+  // 速度の積分は長い途切れで低め / 高めにずれやすい(加速度のバイアス・傾き)。道筋の形(向き)は信用して、
+  // 復帰位置に届くよう全体の長さだけ拡縮する。拡縮が大きすぎる(= 向きも怪しい)場合は直線に戻す。
+  const pe = P[m - 1], pn = pe[0] * pe[0] + pe[1] * pe[1];
+  if (pn > 1) {
+    const k = (end[0] * pe[0] + end[1] * pe[1]) / pn;
+    if (k < 0.4 || k > 2.5) return null;
+    for (let j = 0; j < m; j++) { P[j] = [P[j][0] * k, P[j][1] * k]; S[j] *= k; }
+  }
+  const L = S[m - 1];
   const r = [end[0] - P[m - 1][0], end[1] - P[m - 1][1]];
-  if (Math.hypot(r[0], r[1]) > 0.5 * L + 30) return null; // 積分が復帰位置と合わない = 信用しない(直線に戻す)
+  if (Math.hypot(r[0], r[1]) > 0.5 * L + 30) return null; // 向きが復帰位置と合わない = 信用しない(直線に戻す)
   for (let j = 0; j < m; j++) { // 復帰位置に合うよう、進んだ距離に比例して補正
     const f = L > 1e-6 ? S[j] / L : (T[j] - ta) / (tb - ta);
     P[j] = [P[j][0] + r[0] * f, P[j][1] + r[1] * f];
