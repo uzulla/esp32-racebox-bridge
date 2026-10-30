@@ -72,6 +72,8 @@ The session number counts up per boot (kept in NVS). Flushed every second.
   initialises SPI2 with the TF pins and routes its clock/MOSI to the LCD pins (GPIO1/2) too; each device only reacts
   to its own CS. Board v2 wires the TF slot differently and is not supported.
 
+Logs can be played back on a map with [`log-viewer/`](log-viewer/README.md).
+
 ### Soft AP
 
 The Wi-Fi runs as AP+STA. The STA joins the configured network (below); the AP `RCBXBRD-XXXXXX` lets a phone or PC
