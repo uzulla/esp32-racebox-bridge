@@ -293,7 +293,7 @@ function findStationary(d) {
     let a = i, b = j;
     while (a < b && d.t[a] - d.t[i] < 0.3) a++;
     while (b > a && d.t[j] - d.t[b] < 0.3) b--;
-    if (d.t[b] - d.t[a] >= 1.5) {
+    if (d.t[j] - d.t[i] >= 1.5) { // 長さは除く前の停止時間で見る(平均は除いた後の区間で取る)
       const m = [0, 0, 0];
       for (let k = a; k <= b; k++) { m[0] += d.acc_x[k]; m[1] += d.acc_y[k]; m[2] += d.acc_z[k]; }
       const cnt = b - a + 1;
@@ -410,11 +410,32 @@ function computeG(d) {
   }
 }
 
+// 1 行だけ離れた位置(前後の行はつながっているのに、その行だけ速度から見てありえない距離にある)を無効にする。
+// 続けて飛んだ場合は本当の移動と区別できないので触らない
+const JUMP_SLACK = 30; // m。速度から出した移動距離に足す余裕(GPS のゆらぎ分)
+function dropJumps(d) {
+  const far = (a, b) => haversine(d.lat[a], d.lon[a], d.lat[b], d.lon[b]) >
+    Math.max(d.speed_kmh[a], d.speed_kmh[b]) / 3.6 * (d.t[b] - d.t[a]) * 2 + JUMP_SLACK;
+  const bad = [];
+  let p = -1, c = -1; // 直前 2 つの有効な行
+  for (let i = 0; i < d.n; i++) {
+    if (!d.valid[i]) continue;
+    if (p >= 0 && d.t[i] - d.t[p] <= GAP_MIN && far(p, c) && far(c, i) && !far(p, i)) bad.push(c);
+    p = c; c = i;
+  }
+  if (!bad.length) return 0;
+  for (const i of bad) d.valid[i] = 0;
+  for (let i = 0, last = -1; i < d.n; i++) { if (d.valid[i]) last = i; d.posIdx[i] = last; }
+  return bad.length;
+}
+
 function build(rows, name) {
   // fix は 0 / 2 / 3 だけが本物。起動直後のダミー行(fix=87 など)は捨てる
   const ok = rows.filter((r) => ['0', '2', '3'].includes(r.fix) && r.t_ms !== '' && isFinite(+r.t_ms));
   const n = ok.length;
   if (!n) throw new Error('有効な行がありません');
+  // 時刻が戻るログ(複数のファイルをつなげたものなど)は、時間差が負になり距離や時間が壊れるので読まない
+  if (ok.some((r, i) => i > 0 && +r.t_ms < +ok[i - 1].t_ms)) throw new Error('t_ms が時間順になっていません');
   // 空欄は 0 ではなく欠測(NaN)として扱う
   const num = (k) => Float64Array.from(ok, (r) => (r[k] === '' || r[k] === undefined ? NaN : +r[k]));
   // batt は Mini が整数(%)、Micro が小数 1 桁(V)。区別のため元の文字列を残す
@@ -431,6 +452,7 @@ function build(rows, name) {
         Math.abs(d.lat[i]) <= 90 && Math.abs(d.lon[i]) <= 180) { d.valid[i] = 1; last = i; nvalid++; }
     d.posIdx[i] = last;
   }
+  nvalid -= dropJumps(d);
   d.nvalid = nvalid;
   d.firstValid = d.valid.indexOf(1);
   // 方位: その行以前で最後に走っていた(2 km/h 超)ときの値。シークの履歴に依らない。走り出す前は最初の値
@@ -440,6 +462,7 @@ function build(rows, name) {
     if (d.fix[i] === 3 && d.speed_kmh[i] > 2 && isFinite(d.heading_deg[i])) cur = d.heading_deg[i];
     d.hd[i] = cur;
   }
+  d.hasHd = d.hd.some((v) => isFinite(v)); // 方位が 1 つも無いログ(計算用には 0 で埋めるが、画面には出さない)
   const firstHd = d.hd.find((v) => isFinite(v)) ?? 0;
   for (let i = 0; i < n && !isFinite(d.hd[i]); i++) d.hd[i] = firstHd;
   computeG(d);
@@ -741,7 +764,8 @@ function drawTrack() {
   drawPath();
   const icon = L.divIcon({
     className: '', iconSize: [28, 28], iconAnchor: [14, 14],
-    html: '<svg class="arrow" viewBox="-14 -14 28 28"><path d="M0-11 L8 9 L0 5 L-8 9 Z" fill="#00cdff" stroke="#fff" stroke-width="2" stroke-linejoin="round"/></svg>',
+    // 方位が無いログは、向きを持たない丸で出す
+    html: `<svg class="arrow" viewBox="-14 -14 28 28">${D.hasHd ? '<path d="M0-11 L8 9 L0 5 L-8 9 Z"' : '<circle r="7"'} fill="#00cdff" stroke="#fff" stroke-width="2" stroke-linejoin="round"/></svg>`,
   });
   marker = L.marker([D.lat[D.firstValid], D.lon[D.firstValid]], { icon, interactive: false, keyboard: false, zIndexOffset: 1000 }).addTo(map);
   fitTrack();
@@ -800,16 +824,17 @@ function show(T) {
   $('delta').textContent = dl && isFinite(dl.arr[i]) ? `${dl.arr[i] >= 0 ? '+' : '−'}${Math.abs(dl.arr[i]).toFixed(3)} s` : '--';
   $('fblr').textContent = isFinite(D.fb[i]) ? `${signed(D.fb[i])} / ${signed(D.lr[i])} G` : '--';
   drawBall(i);
-  $('gbar').style.width = D.hasG ? Math.min(100, D.dynG[i] / Math.max(1.5, D.gmax) * 100) + '%' : '0';
+  $('gbar').style.width = D.hasG && Number.isFinite(D.dynG[i]) ? Math.min(100, D.dynG[i] / Math.max(1.5, D.gmax) * 100) + '%' : '0';
   $('acc').textContent = `${fnum(D.acc_x[i], 2)} / ${fnum(D.acc_y[i], 2)} / ${fnum(D.acc_z[i], 2)}`;
   $('alt').textContent = fix3 ? fnum(D.alt_m[i], 0, ' m') : '--';
-  $('gps').textContent = fix3 ? `3D FIX ${D.sats[i]} 衛星` : D.fix[i] === 2 ? `2D FIX ${D.sats[i]} 衛星` : 'FIX なし';
+  const sats = Number.isFinite(D.sats[i]) ? D.sats[i] : '--';
+  $('gps').textContent = fix3 ? `3D FIX ${sats} 衛星` : D.fix[i] === 2 ? `2D FIX ${sats} 衛星` : 'FIX なし';
   $('hacc').textContent = fix3 ? fnum(D.hacc_m[i], 1, ' m') : '--';
   $('yaw').textContent = fnum(D.gyro_z[i], 1, ' °/s');
   const braw = D.battRaw[i];
   $('batt').textContent = braw === '' || !isFinite(+braw) ? '--' : braw.includes('.') ? `${(+braw).toFixed(1)} V` : `${braw} %` + (D.charging[i] ? ' 充電中' : '');
   const heading = D.hd[i];
-  $('hdg').textContent = fix3 ? `${Math.round(heading)}°` : '--';
+  $('hdg').textContent = fix3 && D.hasHd ? `${Math.round(heading)}°` : '--';
   $('pos').textContent = `${fmtT(T - V.t0)} / ${fmtT(V.t1 - V.t0)}`;
   $('seek').value = T;
   if (marker && pi >= 0) {
@@ -1088,7 +1113,7 @@ async function loadFile(f) {
   const seq = ++loadSeq;
   let text;
   try { text = await f.text(); } catch (e) { if (seq === loadSeq) loadFailed(); return; }
-  if (seq === loadSeq) load(text, f.name);
+  if (seq === loadSeq) { $('files').value = ''; load(text, f.name); } // 選択欄を空に戻す(表示中のログと食い違わせない。同じ項目も選び直せる)
 }
 $('pick').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) loadFile(f); };
 function updateGapInfo() {
