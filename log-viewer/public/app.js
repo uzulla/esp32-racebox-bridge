@@ -4,15 +4,26 @@
 const $ = (id) => document.getElementById(id);
 
 // ---- 地図 ----
-const map = L.map('map', { zoomControl: true, preferCanvas: true }).setView([35.68, 139.76], 5);
+const map = L.map('map', { zoomControl: true, preferCanvas: true, maxZoom: 22 }).setView([35.68, 139.76], 5);
+// maxNativeZoom を超えた分は、最大ズームのタイルを引き伸ばして拡大する(サーキットの細部を大きく見るため)
+const GSI = '<a href="https://maps.gsi.go.jp/development/ichiran.html">地理院タイル</a>';
 const baseLayers = {
-  'OpenStreetMap': L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap contributors' }),
-  '地理院 標準地図': L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png', { maxZoom: 18, attribution: '<a href="https://maps.gsi.go.jp/development/ichiran.html">地理院タイル</a>' }),
-  '地理院 空中写真': L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg', { maxZoom: 18, attribution: '<a href="https://maps.gsi.go.jp/development/ichiran.html">地理院タイル</a>' }),
+  'OpenStreetMap': L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 22, maxNativeZoom: 19, attribution: '© OpenStreetMap contributors' }),
+  '地理院 標準地図': L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png', { maxZoom: 22, maxNativeZoom: 18, attribution: GSI }),
+  '地理院 空中写真': L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg', { maxZoom: 22, maxNativeZoom: 18, attribution: GSI }),
+  'Esri 衛星写真': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 22, maxNativeZoom: 19, attribution: 'Tiles © Esri — Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community' }),
 };
-baseLayers['OpenStreetMap'].addTo(map);
+let baseName = 'OpenStreetMap';
+try { const v = localStorage.getItem('baseLayer'); if (v && baseLayers[v]) baseName = v; } catch (e) { /* 保存できなくても動く */ }
+baseLayers[baseName].addTo(map);
 L.control.layers(baseLayers, null, { position: 'topright' }).addTo(map);
+map.on('baselayerchange', (e) => { try { localStorage.setItem('baseLayer', e.name); } catch (err) { /* 無視 */ } });
+// 地図タイルを薄くして、描いた線を目立たせる
+function setMapDim(v) {
+  document.documentElement.style.setProperty('--tile-opacity', String(v / 100));
+}
 let trackLayer = L.layerGroup().addTo(map);
+let lapLayer = L.layerGroup().addTo(map); // サーキットモード: 現在 / 選択ラップ
 let marker = null;
 
 // ---- データ ----
@@ -436,7 +447,209 @@ function build(rows, name) {
   applyStill(d, stillOn);
   analyzeGaps(d);
   computeDistance(d, gapInertial);
+  detectLaps(d);
   return d;
+}
+
+// ---- ラップ ----
+// コースの事前情報なしで、軌跡から計測ラインを自動で見つける(lap.js)。位置は GPS の生の値で見る(停止固定の切り替えに左右されない)
+function detectLaps(d) {
+  d.lap = null;
+  if (!d.nvalid) return;
+  const r = Lap.detect({ n: d.n, t: d.t, lat: d.rLat, lon: d.rLon, speed: d.rSpeed, valid: d.valid });
+  if (!r) return;
+  const times = r.laps.map((l) => l.time).sort((a, b) => a - b);
+  const med = times[times.length >> 1];
+  // 中央値の 1.25 倍を超える周回(ピット、スピン、検出漏れ)は参考扱いにして、ベストと平均から外す
+  for (const l of r.laps) l.outlier = l.time > med * 1.25 || l.time < med * 0.75;
+  const good = r.laps.filter((l) => !l.outlier);
+  r.median = med;
+  r.best = good.length ? good.reduce((a, b) => (b.time < a.time ? b : a)) : null;
+  r.sel = -1; // 最初は比較ラップを選ばない(クリックで選ぶ)
+  r.avg = good.length ? good.reduce((s, l) => s + l.time, 0) / good.length : NaN;
+  d.lap = r;
+}
+
+// ---- サーキットモード ----
+// 検知した周回の範囲(core)だけを見る。前後 CIRCUIT_MARGIN 秒は、測定ミスの確認用にグレーで残す。インラップ / アウトラップはその外側
+const CIRCUIT_MARGIN = 300;
+let circuitOn = true;
+function viewRange(d) {
+  if (circuitOn && d.lap && d.lap.laps.length) {
+    const c0 = d.lap.laps[0].start, c1 = d.lap.laps[d.lap.laps.length - 1].end;
+    return { t0: Math.max(0, c0 - CIRCUIT_MARGIN), t1: Math.min(d.duration, c1 + CIRCUIT_MARGIN), c0, c1 };
+  }
+  return { t0: 0, t1: d.duration, c0: 0, c1: d.duration };
+}
+let V = { t0: 0, t1: 0, c0: 0, c1: 0 };
+// 凡例: サーキットモードで周回があるときは、加速 / 減速の凡例にする
+function updateLegend() {
+  const lap = circuitOn && D && D.lap;
+  $('legend').innerHTML = lap
+    ? '<span>減速</span><i style="background:linear-gradient(90deg,rgb(30,110,255),rgb(255,255,255),rgb(255,30,50))"></i><span>加速</span>'
+    : '<span>0</span><i></i><span id="vmax">-- km/h</span>';
+  if (!lap && D) $('vmax').textContent = `${Math.round(D.vmax)} km/h`;
+}
+function updateView() {
+  updateLegend();
+  V = D ? viewRange(D) : { t0: 0, t1: 0, c0: 0, c1: 0 };
+  $('seek').min = V.t0; $('seek').max = V.t1;
+}
+
+// ---- ラップの比較表示(加速 / 減速で色分け) ----
+// 前後加速度(G)は GPS 速度の変化から出す(IMU の取り付け向きに依らない)。±0.15 秒の差分
+const ACC_MAX = 0.4, ACC_BINS = 15;
+function accelAt(i) {
+  const lo = Math.max(0, upperBound(D.t, D.t[i] - 0.2) - 1), hi = Math.min(D.n - 1, upperBound(D.t, D.t[i] + 0.2));
+  const dt = D.t[hi] - D.t[lo];
+  if (dt < 0.1 || !isFinite(D.speed_kmh[hi]) || !isFinite(D.speed_kmh[lo])) return 0;
+  return (D.speed_kmh[hi] - D.speed_kmh[lo]) / 3.6 / dt / 9.80665;
+}
+const NEUTRAL = [255, 255, 255], DECEL = [30, 110, 255], ACCEL = [255, 30, 50]; // 減速 = 青、加減速なし = 白、加速 = 赤(間はグラデーション)
+// 比較ラップ(選択)は現在のラップと重なっても区別できるよう、黄(減速)〜黄緑〜緑(加速)にする
+const NEUTRAL_R = [190, 235, 70], DECEL_R = [255, 214, 0], ACCEL_R = [0, 200, 90];
+function accColor(a, ref) {
+  const n = ref ? NEUTRAL_R : NEUTRAL, dc = ref ? DECEL_R : DECEL, ac = ref ? ACCEL_R : ACCEL;
+  const f = Math.max(-1, Math.min(1, a / ACC_MAX)), to = f < 0 ? dc : ac, k = Math.abs(f);
+  return `rgb(${n.map((c, j) => Math.round(c + (to[j] - c) * k)).join(',')})`;
+}
+const accBin = (a) => Math.max(0, Math.min(ACC_BINS - 1, Math.floor((Math.max(-ACC_MAX, Math.min(ACC_MAX, a)) + ACC_MAX) / (2 * ACC_MAX) * ACC_BINS)));
+const binAcc = (b) => ((b + 0.5) / ACC_BINS) * 2 * ACC_MAX - ACC_MAX;
+
+// ---- 比較ラップとの差(デルタ) ----
+// 各ラップを走行距離の割合(0〜1)でそろえ、同じ地点に着いた時刻の差を出す。+ = 比較ラップより遅い
+function lapProfile(l) {
+  const i0 = upperBound(D.t, l.start), i1 = upperBound(D.t, l.end);
+  if (i1 - i0 < 5) return null;
+  const d0 = D.cum[i0], total = D.cum[i1 - 1] - d0;
+  if (!(total > 10)) return null;
+  const fr = new Float64Array(i1 - i0), tt = new Float64Array(i1 - i0);
+  let prev = 0;
+  for (let k = 0; k < fr.length; k++) { prev = Math.max(prev, Math.min(1, (D.cum[i0 + k] - d0) / total)); fr[k] = prev; tt[k] = D.t[i0 + k] - l.start; }
+  return { i0, i1, fr, tt };
+}
+function ensureDelta() {
+  const r = D && D.lap;
+  if (!r || r.sel < 0) return null;
+  if (r.delta && r.delta.sel === r.sel) return r.delta;
+  const arr = new Float64Array(D.n).fill(NaN);
+  const ref = lapProfile(r.laps[r.sel]);
+  if (!ref) { r.delta = { sel: r.sel, arr, scale: 1 }; return r.delta; }
+  const tRef = (f) => {
+    let lo = 0, hi = ref.fr.length - 1;
+    while (lo < hi) { const m = (lo + hi) >> 1; if (ref.fr[m] < f) lo = m + 1; else hi = m; }
+    if (lo === 0) return ref.tt[0];
+    const a = ref.fr[lo - 1], b = ref.fr[lo];
+    return b > a ? ref.tt[lo - 1] + (ref.tt[lo] - ref.tt[lo - 1]) * ((f - a) / (b - a)) : ref.tt[lo];
+  };
+  const mags = [];
+  r.laps.forEach((l) => {
+    const pr = lapProfile(l);
+    if (!pr) return;
+    for (let k = 0; k < pr.fr.length; k++) {
+      const v = pr.tt[k] - tRef(pr.fr[k]);
+      arr[pr.i0 + k] = v;
+      if (!l.outlier && k % 5 === 0) mags.push(Math.abs(v));
+    }
+  });
+  mags.sort((a, b) => a - b);
+  const p95 = mags.length ? mags[Math.min(mags.length - 1, Math.floor(mags.length * 0.95))] : 1;
+  r.delta = { sel: r.sel, arr, scale: Math.max(0.5, Math.ceil(p95 * 2) / 2) };
+  return r.delta;
+}
+
+function lapIndexAt(t) {
+  if (!D || !D.lap) return -1;
+  const laps = D.lap.laps;
+  for (let k = 0; k < laps.length; k++) if (t >= laps[k].start && t < laps[k].end) return k;
+  return -1;
+}
+let curLap = -1;
+const lapRenderer = L.canvas({ padding: 0.5 }); // 描き直すたびにキャンバスが増えないよう共有する
+function paintLap(l, opts) {
+  const i0 = upperBound(D.t, l.start), i1 = upperBound(D.t, l.end);
+  const renderer = lapRenderer;
+  if (opts.casing) { // 縁取り(黒)。途切れの区間は結ばない
+    let seg = [], last = -1;
+    const emit = () => { if (seg.length > 1) L.polyline(seg, { color: '#000', weight: opts.casing, opacity: 0.6, renderer, interactive: false }).addTo(lapLayer); seg = []; };
+    for (let i = i0; i < i1; i++) {
+      if (!D.valid[i]) continue;
+      if (last >= 0 && D.t[i] - D.t[last] > GAP_MIN) emit();
+      if (!seg.length || D.t[i] - D.t[last] >= 1 / trackHz - 1e-6) { seg.push([D.lat[i], D.lon[i]]); last = i; }
+    }
+    emit();
+  }
+  let run = null, prev = -1;
+  const flush = () => {
+    if (run && run.pts.length > 1) L.polyline(run.pts, { color: accColor(binAcc(run.bin), opts.ref), weight: opts.weight, opacity: opts.opacity, renderer, interactive: false }).addTo(lapLayer);
+    run = null;
+  };
+  const step = 1 / trackHz; // 画面上部の「軌跡の細かさ」に従う
+  let lastT = -1e9;
+  for (let i = i0; i < i1; i++) {
+    if (!D.valid[i] || D.t[i] - lastT < step - 1e-6) continue;
+    lastT = D.t[i];
+    const bin = accBin(accelAt(i));
+    const pt = [D.lat[i], D.lon[i]];
+    if (prev >= 0 && D.t[i] - D.t[prev] > GAP_MIN) { flush(); }
+    if (run && run.bin === bin) run.pts.push(pt);
+    else { const last = run ? run.pts[run.pts.length - 1] : null; flush(); run = { bin, pts: last ? [last, pt] : [pt] }; }
+    prev = i;
+  }
+  flush();
+}
+function drawLaps() {
+  lapLayer.clearLayers();
+  if (!D || !D.lap || !circuitOn) return;
+  const laps = D.lap.laps;
+  const sel = laps[D.lap.sel];
+  if (sel) paintLap(sel, { weight: 5, opacity: 0.9, casing: 8, ref: true }); // 選択ラップ: やや太く、黒い縁取りで地図から浮かせる
+  const cur = laps[curLap];
+  if (cur) paintLap(cur, { weight: 2.5, opacity: 1 });  // 現在のラップ: 細く不透明で上に重ねる
+}
+function updateLapRows() {
+  if (!D || !D.lap) return;
+  [...$('laps').children].forEach((row, k) => {
+    row.classList.toggle('sel', k === D.lap.sel);
+    row.classList.toggle('cur', k === curLap);
+  });
+}
+function setSelLap(k) {
+  if (!D || !D.lap) return;
+  D.lap.sel = D.lap.sel === k ? -1 : k; // もう一度クリックで非表示
+  updateLapRows();
+  drawLaps();
+  layoutChart();
+  show(T);
+}
+// 再生位置が別のラップに入ったら、現在のラップを描き直す
+function syncCurLap(t) {
+  if (!circuitOn || !D || !D.lap) return;
+  const k = lapIndexAt(t);
+  if (k !== curLap) { curLap = k; updateLapRows(); drawLaps(); }
+}
+
+const fmtLap = (s) => `${Math.floor(s / 60)}:${(s % 60).toFixed(3).padStart(6, '0')}`;
+function updateLapInfo() {
+  const box = $('laps');
+  box.textContent = '';
+  if (!D || !D.lap) {
+    $('lapsum').textContent = D ? '周回を検出できませんでした' : '--';
+    return;
+  }
+  const r = D.lap;
+  $('lapsum').textContent = `${r.laps.length} 周 / ベスト ${r.best ? fmtLap(r.best.time) : '--'} / 平均 ${fmtLap(r.avg)}`;
+  r.laps.forEach((l, i) => {
+    const row = document.createElement('div');
+    row.className = 'lap' + (l === r.best ? ' best' : '') + (l.outlier ? ' out' : '');
+    const diff = r.best && !l.outlier ? `+${(l.time - r.best.time).toFixed(3)}` : l.outlier ? '参考' : '';
+    row.innerHTML = `<span>${i + 1}</span><span>${fmtLap(l.time)}</span><span>${diff}</span>`;
+    row.title = 'クリック: 比較に選ぶ / ダブルクリック: 頭出し';
+    row.onclick = () => setSelLap(i);
+    row.ondblclick = () => setTime(l.start);
+    box.appendChild(row);
+  });
+  updateLapRows();
 }
 
 // ---- 表示 ----
@@ -456,13 +669,15 @@ const BINS = 24; // 速度の色段階。同じ段階が続く区間は 1 本の
 function drawPath() {
   trackLayer.clearLayers();
   if (!D.nvalid) return;
+  if (circuitOn && D.lap && D.lap.laps.length) { drawGate(); drawLaps(); return; } // サーキットモード: 現在 / 選択ラップだけ描く
+  lapLayer.clearLayers();
   const renderer = L.canvas({ padding: 0.5 });
   const minDt = 1 / trackHz - 1e-6;
   const kept = [];
   const breaks = new Set(); // 途切れ(GAP_MIN 秒超)の直後の点。間引き後の間隔ではなく、元のデータで判定する
   let lastValid = -1;
   for (let i = 0; i < D.n; i++) {
-    if (!D.valid[i]) continue;
+    if (!D.valid[i] || D.t[i] < V.t0 || D.t[i] > V.t1) continue;
     if (lastValid < 0 || D.t[i] - D.t[lastValid] > GAP_MIN) {
       breaks.add(i);
       if (lastValid >= 0 && kept[kept.length - 1] !== lastValid) kept.push(lastValid); // 途切れの手前の点も残す
@@ -477,14 +692,16 @@ function drawPath() {
   let run = null;
   const flush = () => {
     if (run && run.pts.length > 1) {
-      L.polyline(run.pts, { color: speedColor((run.bin + 0.5) / BINS * D.vmax, D.vmax), weight: 5, opacity: 0.9, renderer }).addTo(trackLayer);
+      const out = run.bin >= 100, bin = run.bin % 100;
+      L.polyline(run.pts, out ? { color: '#6b7390', weight: 4, opacity: 0.55, renderer }
+        : { color: speedColor((bin + 0.5) / BINS * D.vmax, D.vmax), weight: 5, opacity: 0.9, renderer }).addTo(trackLayer);
     }
     run = null;
   };
   for (let k = 1; k < kept.length; k++) {
     const p = kept[k - 1], i = kept[k];
     if (breaks.has(i)) { flush(); continue; } // 途切れた区間は実線で結ばない(下で点線の補完線を引く)
-    const b = binOf(D.speed_kmh[i]);
+    const b = binOf(D.speed_kmh[i]) + (D.t[i] < V.c0 || D.t[i] > V.c1 ? 100 : 0);
     if (run && run.bin === b) {
       run.pts.push([D.lat[i], D.lon[i]]);
     } else {
@@ -494,6 +711,7 @@ function drawPath() {
   }
   flush();
   for (const g of D.gaps) { // 途切れ: 補完した道筋を点線で
+    if (D.t[g.a] < V.t0 || D.t[g.b] > V.t1) continue;
     const est = gapInertial && g.inertial ? g.inertial : g.line;
     const how = gapInertial && g.inertial ? '慣性' : '直線';
     L.polyline(est.pts, { color: g.skipped ? '#8591b0' : '#ffb000', weight: 3, opacity: 0.9, dashArray: '6 8', renderer })
@@ -503,10 +721,21 @@ function drawPath() {
   const s0 = kept[0], e = kept[kept.length - 1];
   L.circleMarker([D.lat[s0], D.lon[s0]], { radius: 6, color: '#fff', fillColor: '#32e678', fillOpacity: 1, weight: 2 }).bindTooltip('START').addTo(trackLayer);
   L.circleMarker([D.lat[e], D.lon[e]], { radius: 6, color: '#fff', fillColor: '#ff4646', fillOpacity: 1, weight: 2 }).bindTooltip('END').addTo(trackLayer);
+  if (D.lap) drawGate();
+}
+
+function drawGate() {
+  if (D.lap) {
+    const g = D.lap.gate;
+    // スタートライン(自動検出)。黒地に白の破線でチェッカー風にして、軌跡の上でも目立たせる
+    const ll = [[g.a.lat, g.a.lon], [g.b.lat, g.b.lon]];
+    L.polyline(ll, { color: '#000', weight: 9, opacity: 1, interactive: false }).addTo(trackLayer);
+    L.polyline(ll, { color: '#fff', weight: 6, opacity: 1, dashArray: '5 5' }).addTo(trackLayer);
+  }
 }
 
 function drawTrack() {
-  trackLayer.clearLayers();
+  trackLayer.clearLayers(); lapLayer.clearLayers();
   if (marker) { map.removeLayer(marker); marker = null; }
   if (!D.nvalid) { $('notice').textContent = '位置(3D FIX)が取れていないログです。地図は表示できません'; return; }
   drawPath();
@@ -519,14 +748,15 @@ function drawTrack() {
 }
 
 function clearView() {
-  trackLayer.clearLayers();
+  trackLayer.clearLayers(); lapLayer.clearLayers();
   if (marker) { map.removeLayer(marker); marker = null; }
-  for (const id of ['g', 'acc', 'hdg', 'alt', 'gps', 'hacc', 'yaw', 'batt', 'clock']) $(id).textContent = '--';
+  for (const id of ['delta', 'g', 'acc', 'hdg', 'alt', 'gps', 'hacc', 'yaw', 'batt', 'clock']) $(id).textContent = '--';
   $('speed').firstChild.nodeValue = '--';
   $('gbar').style.width = '0';
   $('dist').textContent = '--'; $('fblr').textContent = '--'; $('gapinfo').textContent = '--'; $('stillinfo').textContent = '--';
   $('pos').textContent = '0:00 / 0:00';
-  $('seek').max = 0; $('seek').value = 0;
+  $('laps').textContent = ''; $('lapsum').textContent = '--';
+  $('seek').min = 0; $('seek').max = 0; $('seek').value = 0;
   $('vmax').textContent = '-- km/h';
   $('meta').textContent = 'CSV を選ぶか、ここにドロップしてください';
   layoutChart();
@@ -536,8 +766,8 @@ function clearView() {
 
 function fitTrack() {
   const ll = [];
-  for (let i = 0; i < D.n; i++) if (D.valid[i]) ll.push([D.lat[i], D.lon[i]]);
-  if (ll.length) map.fitBounds(L.latLngBounds(ll), { padding: [40, 40], maxZoom: 18 });
+  for (let i = 0; i < D.n; i++) if (D.valid[i] && D.t[i] >= V.c0 && D.t[i] <= V.c1) ll.push([D.lat[i], D.lon[i]]);
+  if (ll.length) map.fitBounds(L.latLngBounds(ll), { padding: [40, 40], maxZoom: 20 });
 }
 
 // 欠測(NaN)は「NaN」と出さずに「--」にする
@@ -557,6 +787,8 @@ function upperBound(arr, x) { let lo = 0, hi = arr.length; while (lo < hi) { con
 let arrowRot = 0; // 矢印の累積角度(北をまたいでも逆回りに一周しないよう、差を ±180° に畳んで足す)
 function show(T) {
   if (!D) return;
+  syncCurLap(T);
+  followChart(T);
   const i = Math.max(0, upperBound(D.t, T) - 1);
   const pi = D.posIdx[i] >= 0 ? D.posIdx[i] : D.firstValid; // FIX 前は最初の有効位置に置く
   const fix3 = D.fix[i] === 3;
@@ -564,6 +796,8 @@ function show(T) {
   $('clock').textContent = jst(D.utc[i]) || '--';
   $('g').textContent = D.hasG ? fnum(D.dynG[i], 2, ' G') : '--';
   $('dist').textContent = `${fmtKm(D.cum[i])} / ${fmtKm(D.distance)}`;
+  const dl = circuitOn ? ensureDelta() : null;
+  $('delta').textContent = dl && isFinite(dl.arr[i]) ? `${dl.arr[i] >= 0 ? '+' : '−'}${Math.abs(dl.arr[i]).toFixed(3)} s` : '--';
   $('fblr').textContent = isFinite(D.fb[i]) ? `${signed(D.fb[i])} / ${signed(D.lr[i])} G` : '--';
   drawBall(i);
   $('gbar').style.width = D.hasG ? Math.min(100, D.dynG[i] / Math.max(1.5, D.gmax) * 100) + '%' : '0';
@@ -576,7 +810,7 @@ function show(T) {
   $('batt').textContent = braw === '' || !isFinite(+braw) ? '--' : braw.includes('.') ? `${(+braw).toFixed(1)} V` : `${braw} %` + (D.charging[i] ? ' 充電中' : '');
   const heading = D.hd[i];
   $('hdg').textContent = fix3 ? `${Math.round(heading)}°` : '--';
-  $('pos').textContent = `${fmtT(T)} / ${fmtT(D.duration)}`;
+  $('pos').textContent = `${fmtT(T - V.t0)} / ${fmtT(V.t1 - V.t0)}`;
   $('seek').value = T;
   if (marker && pi >= 0) {
     const ll = [D.lat[pi], D.lon[pi]];
@@ -618,6 +852,32 @@ function drawBall(i) {
 // ---- グラフ(速度 + G。クリック / ドラッグでシーク) ----
 const cv = $('chart'), ctx = cv.getContext('2d');
 let base = null; // 背景(データ部分)のキャッシュ
+// チャートの表示範囲(ズーム)。null = 表示範囲(V)全体
+let CZ = null;
+function chartRange() {
+  if (!CZ) return { t0: V.t0, t1: V.t1 };
+  const span = Math.min(V.t1 - V.t0, CZ.t1 - CZ.t0);
+  const t0 = Math.min(V.t1 - span, Math.max(V.t0, CZ.t0));
+  return { t0, t1: t0 + span };
+}
+function zoomChart(factor, anchorT) {
+  if (!D) return;
+  const R = chartRange(), span = R.t1 - R.t0, full = V.t1 - V.t0;
+  const ns = Math.min(full, Math.max(5, span * factor));
+  if (ns >= full - 1e-6) { CZ = null; } else {
+    const f = (anchorT - R.t0) / span; // アンカーの画面上の位置は保つ
+    const t0 = Math.min(V.t1 - ns, Math.max(V.t0, anchorT - f * ns));
+    CZ = { t0, t1: t0 + ns };
+  }
+  layoutChart(); drawCursor(T);
+}
+function panChart(dt) {
+  if (!D || !CZ) return;
+  const R = chartRange(), span = R.t1 - R.t0;
+  const t0 = Math.min(V.t1 - span, Math.max(V.t0, R.t0 + dt));
+  CZ = { t0, t1: t0 + span };
+  layoutChart(); drawCursor(T);
+}
 function layoutChart() {
   const dpr = window.devicePixelRatio || 1;
   const w = cv.clientWidth, h = cv.clientHeight;
@@ -626,34 +886,73 @@ function layoutChart() {
   const c = base.getContext('2d');
   c.scale(dpr, dpr);
   if (!D) return;
-  const padL = 40, padR = 8, mid = h / 2;
-  const plot = (arr, y0, y1, max, color, label, unit) => {
+  const R = chartRange();
+  const padL = 40, padR = 8, sw = w - padL - padR, span = Math.max(1e-6, R.t1 - R.t0);
+  const xOf = (t) => padL + ((t - R.t0) / span) * sw;
+  const delta = circuitOn ? ensureDelta() : null;
+  const np = delta ? 3 : 2, ph = h / np;
+  const yTop = (k) => k * ph + 4, yBot = (k) => (k + 1) * ph - 4;
+  const i0 = Math.max(0, upperBound(D.t, R.t0) - 1), i1 = Math.min(D.n, upperBound(D.t, R.t1) + 1);
+  const stepV = Math.max(1, Math.floor((i1 - i0) / (w * 2)));
+  const frame = (y0, y1, label, top, bottom) => {
     c.strokeStyle = '#26304d'; c.fillStyle = '#8591b0'; c.font = '11px sans-serif'; c.lineWidth = 1;
     c.beginPath(); c.moveTo(padL, y0); c.lineTo(w - padR, y0); c.moveTo(padL, y1); c.lineTo(w - padR, y1); c.stroke();
-    c.fillText(`${max.toFixed(max < 5 ? 1 : 0)}${unit}`, 2, y0 + 10);
-    c.fillText(label, 2, y1 - 2);
+    c.fillText(top, 2, y0 + 10);
+    if (bottom) c.fillText(bottom, 2, y1 - 2);
+    c.fillText(label, 2, (y0 + y1) / 2 + 4);
+  };
+  const plot = (arr, y0, y1, max, color, label, unit) => {
+    frame(y0, y1, '', `${max.toFixed(max < 5 ? 1 : 0)}${unit}`, label);
     c.strokeStyle = color; c.lineWidth = 1.5; c.beginPath();
     let started = false;
-    const step = Math.max(1, Math.floor(D.n / (w * 2)));
     const yOf = (v) => y1 - Math.min(1, v / max) * (y1 - y0);
-    for (let i = 0; i < D.n; i += step) {
+    let outside = null;
+    for (let i = i0; i < i1; i += stepV) {
+      const isOut = D.t[i] < V.c0 || D.t[i] > V.c1;
+      if (outside !== null && isOut !== outside) { c.stroke(); c.beginPath(); started = false; }
+      if (outside !== isOut) { c.strokeStyle = isOut ? '#4a526e' : color; outside = isOut; }
       // 間引くときも区間の最小・最大を残す(短いピークが消えないように)
       let lo = Infinity, hi = -Infinity;
-      for (let j = i; j < Math.min(D.n, i + step); j++) {
+      for (let j = i; j < Math.min(i1, i + stepV); j++) {
         const v = arr[j];
         if (isFinite(v)) { if (v < lo) lo = v; if (v > hi) hi = v; }
       }
       if (lo === Infinity) { started = false; continue; }
-      const x = padL + (D.t[i] / D.duration) * (w - padL - padR);
+      const x = xOf(D.t[i]);
       if (!started) { c.moveTo(x, yOf(lo)); started = true; } else c.lineTo(x, yOf(lo));
       if (hi !== lo) c.lineTo(x, yOf(hi));
     }
     c.stroke();
   };
   const sp = Float64Array.from({ length: D.n }, (_, i) => (D.fix[i] === 3 ? D.speed_kmh[i] : NaN));
-  plot(sp, 4, mid - 4, Math.max(10, Math.ceil(D.vmax / 10) * 10), '#ff4646', '速度', 'km/h');
-  plot(D.dynG, mid + 4, h - 4, Math.max(0.5, Math.ceil(D.gmax * 4) / 4), '#00cdff', 'G', 'G');
-  chartGeom = { padL, padR, w };
+  plot(sp, yTop(0), yBot(0), Math.max(10, Math.ceil(D.vmax / 10) * 10), '#ff4646', '速度', 'km/h');
+  plot(D.dynG, yTop(1), yBot(1), Math.max(0.5, Math.ceil(D.gmax * 4) / 4), '#00cdff', 'G', 'G');
+  if (delta) { // 比較ラップとの差。上 = 遅い(+)、下 = 速い(−)
+    const y0 = yTop(2), y1 = yBot(2), ym = (y0 + y1) / 2, sc = delta.scale, half = (y1 - y0) / 2;
+    frame(y0, y1, 'Δ', `+${sc.toFixed(1)}s`, `−${sc.toFixed(1)}s`);
+    c.strokeStyle = '#4a526e'; c.beginPath(); c.moveTo(padL, ym); c.lineTo(w - padR, ym); c.stroke();
+    c.lineWidth = 1.5;
+    let px = null, py = null, pc = null;
+    for (let i = i0; i < i1; i += stepV) {
+      const v = delta.arr[i];
+      if (!isFinite(v)) { px = null; continue; }
+      const x = xOf(D.t[i]), y = ym - Math.max(-1, Math.min(1, v / sc)) * half;
+      if (px !== null) { c.strokeStyle = v >= 0 ? '#ff7a7a' : '#5ee08a'; c.beginPath(); c.moveTo(px, py); c.lineTo(x, y); c.stroke(); }
+      px = x; py = y;
+    }
+  }
+  if (R.t0 < V.c0 || R.t1 > V.c1) { // 範囲外(グレーアウト)の背景
+    c.fillStyle = 'rgba(133,145,176,.12)';
+    const l = xOf(V.c0), r = xOf(V.c1);
+    if (l > padL) c.fillRect(padL, 0, Math.min(l, w - padR) - padL, h);
+    if (r < w - padR) c.fillRect(Math.max(padL, r), 0, w - padR - Math.max(padL, r), h);
+  }
+  if (D.lap && circuitOn) { // 周回の区切り
+    c.strokeStyle = 'rgba(255,255,255,.25)'; c.lineWidth = 1; c.beginPath();
+    for (const l of D.lap.laps) { if (l.start < R.t0 || l.start > R.t1) continue; const x = xOf(l.start); c.moveTo(x, 0); c.lineTo(x, h); }
+    c.stroke();
+  }
+  chartGeom = { padL, padR, w, R };
 }
 let chartGeom = null;
 function drawCursor(T) {
@@ -662,36 +961,61 @@ function drawCursor(T) {
   ctx.clearRect(0, 0, cv.width, cv.height);
   if (base) ctx.drawImage(base, 0, 0);
   if (!D || !chartGeom) return;
-  const { padL, padR, w } = chartGeom;
-  const x = (padL + (T / D.duration) * (w - padL - padR)) * dpr;
+  const { padL, padR, w, R } = chartGeom;
+  if (T < R.t0 || T > R.t1) return;
+  const x = (padL + ((T - R.t0) / Math.max(1e-6, R.t1 - R.t0)) * (w - padL - padR)) * dpr;
   ctx.fillStyle = '#fff'; ctx.fillRect(x - 1, 0, 2, cv.height);
 }
 function seekFromEvent(e) {
   if (!D || !chartGeom) return;
   const r = cv.getBoundingClientRect();
-  const { padL, padR, w } = chartGeom;
+  const { padL, padR, w, R } = chartGeom;
   const f = (e.clientX - r.left - padL) / (w - padL - padR);
-  setTime(Math.min(1, Math.max(0, f)) * D.duration);
+  setTime(R.t0 + Math.min(1, Math.max(0, f)) * (R.t1 - R.t0));
+}
+// 再生中にズームしていて、カーソルが範囲の外に出たら、範囲を送る
+function followChart(t) {
+  if (!CZ || !playing) return;
+  const R = chartRange();
+  if (t >= R.t0 && t <= R.t1) return;
+  const span = R.t1 - R.t0;
+  CZ = { t0: Math.min(V.t1 - span, Math.max(V.t0, t - span * 0.2)), t1: 0 };
+  CZ.t1 = CZ.t0 + span;
+  layoutChart();
 }
 let dragging = false;
 cv.addEventListener('pointerdown', (e) => { dragging = true; cv.setPointerCapture(e.pointerId); seekFromEvent(e); });
 cv.addEventListener('pointermove', (e) => { if (dragging) seekFromEvent(e); });
 cv.addEventListener('pointerup', () => { dragging = false; });
+// ズーム: ホイール(トラックパッドはピンチ)でカーソル位置を中心に拡大 / 縮小、Shift+ホイール(横スクロール)で左右に移動
+cv.addEventListener('wheel', (e) => {
+  if (!D || !chartGeom) return;
+  e.preventDefault();
+  const { padL, padR, w, R } = chartGeom;
+  const rect = cv.getBoundingClientRect();
+  const f = Math.min(1, Math.max(0, (e.clientX - rect.left - padL) / (w - padL - padR)));
+  const anchor = R.t0 + f * (R.t1 - R.t0);
+  if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) panChart(((e.deltaX || e.deltaY) / (w - padL - padR)) * (R.t1 - R.t0));
+  else zoomChart(Math.exp(e.deltaY * (e.ctrlKey ? 0.01 : 0.0025)), anchor);
+}, { passive: false });
+$('zin').onclick = () => { const R = chartRange(); zoomChart(0.5, T >= R.t0 && T <= R.t1 ? T : (R.t0 + R.t1) / 2); };
+$('zout').onclick = () => { const R = chartRange(); zoomChart(2, T >= R.t0 && T <= R.t1 ? T : (R.t0 + R.t1) / 2); };
+$('zall').onclick = () => { CZ = null; if (D) { layoutChart(); drawCursor(T); } };
 window.addEventListener('resize', () => { layoutChart(); show(T); map.invalidateSize(); });
 
 // ---- 再生 ----
 let T = 0, playing = false, lastFrame = 0;
-function setTime(t) { T = Math.min(D ? D.duration : 0, Math.max(0, t)); show(T); }
+function setTime(t) { T = Math.min(D ? V.t1 : 0, Math.max(D ? V.t0 : 0, t)); show(T); }
 function frame(now) {
   if (!playing) return;
   T += ((now - lastFrame) / 1000) * +$('rate').value;
   lastFrame = now;
-  if (T >= D.duration) { T = D.duration; setPlaying(false); }
+  if (T >= V.t1) { T = V.t1; setPlaying(false); }
   show(T);
   if (playing) requestAnimationFrame(frame);
 }
 function setPlaying(p) {
-  if (p && D && T >= D.duration) T = 0;
+  if (p && D && T >= V.t1) T = V.t0;
   playing = p && !!D;
   $('play').textContent = playing ? '❚❚' : '▶';
   if (playing) { lastFrame = performance.now(); requestAnimationFrame(frame); }
@@ -727,12 +1051,15 @@ function load(text, name) {
   $('vmax').textContent = `${Math.round(D.vmax)} km/h`;
   updateGapInfo();
   updateStillInfo();
-  $('seek').max = D.duration;
+  updateLapInfo();
+  updateView();
+  CZ = null;
   arrowRot = D.hd[0];
-  T = 0;
+  T = V.t0;
+  curLap = circuitOn && D.lap ? lapIndexAt(T) : -1;
   drawTrack();
   layoutChart();
-  show(0);
+  show(T);
 }
 
 // 選び直したとき、遅れて届いた古い応答で上書きしないよう連番で最新だけ反映する
@@ -817,4 +1144,28 @@ addEventListener('drop', async (e) => {
   // 実走ログ(最も大きい CSV)があれば最初に開く。無ければ先頭
   const pick = files.slice().sort((a, b) => b.size - a.size)[0];
   if (pick && seq === loadSeq) { sel.value = pick.name; loadServer(pick.name); }
+})();
+
+$('circuit').onchange = (e) => {
+  circuitOn = e.target.checked;
+  if (!D) return;
+  updateView();
+  CZ = null;
+  setTime(Math.min(V.t1, Math.max(V.t0, T)));
+  curLap = circuitOn ? lapIndexAt(T) : -1;
+  updateLapRows();
+  if (D.nvalid) drawPath();
+  layoutChart();
+  show(T);
+};
+
+$('dim').oninput = (e) => {
+  setMapDim(+e.target.value);
+  try { localStorage.setItem('mapDim', e.target.value); } catch (err) { /* 無視 */ }
+};
+(function () {
+  let v = 55;
+  try { const x = localStorage.getItem('mapDim'); if (x !== null && isFinite(+x)) v = Math.min(100, Math.max(10, +x)); } catch (e) { /* 既定 */ }
+  $('dim').value = v;
+  setMapDim(v);
 })();
