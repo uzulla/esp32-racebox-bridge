@@ -46,6 +46,7 @@
   .lap { display: grid; grid-template-columns: 3em 1fr auto; gap: 8px; padding: 2px 4px; cursor: pointer; border-radius: 4px; }
   .hint { color: var(--dim); font-size: 11px; margin-bottom: 4px; }
   .lap.sel { outline: 1px solid var(--accent); background: #1b2b4d; } .lap.cur span:first-child::before { content: '▶'; color: var(--text); font-size: 9px; margin-right: 2px; }
+  .lap:focus-visible { outline: 2px solid var(--text); }
   .lap:hover { background: #1d2744; } .lap.best { color: var(--green); font-weight: 700; } .lap.out { color: var(--dim); } .lap span:last-child { color: var(--dim); }
   .leaflet-tile-pane { opacity: var(--tile-opacity, .55); }
   #map { background: #0f1530; }
@@ -92,7 +93,7 @@
       <dt>バッテリー</dt><dd id="batt">--</dd>
     </dl>
     <h3>ラップ <small id="lapsum">--</small></h3>
-    <div class="hint">クリック = 比較に選ぶ / もう一度クリック = 非表示 / ダブルクリック = 頭出し。細い線は現在のラップ(赤 = 加速、白 = 加減速なし、青 = 減速)、縁取りのある線は比較ラップ(緑 = 加速、黄 = 減速)。下のグラフに比較ラップとの差(Δ)が出ます</div>
+    <div class="hint">クリック(Enter) = 比較に選ぶ / もう一度 = 非表示 / ダブルクリック(Shift+Enter) = 頭出し。細い線は現在のラップ(赤 = 加速、白 = 加減速なし、青 = 減速)、縁取りのある線は比較ラップ(緑 = 加速、黄 = 減速)。下のグラフに比較ラップとの差(Δ)が出ます</div>
     <div id="laps"></div>
     <div class="legend" id="legend"><span>0</span><i></i><span id="vmax">-- km/h</span></div>
     <p style="margin-top:16px"><label><input type="checkbox" id="follow" checked> 現在地を追う</label><br>

@@ -667,9 +667,16 @@ function updateLapInfo() {
     row.className = 'lap' + (l === r.best ? ' best' : '') + (l.outlier ? ' out' : '');
     const diff = r.best && !l.outlier ? `+${(l.time - r.best.time).toFixed(3)}` : l.outlier ? '参考' : '';
     row.innerHTML = `<span>${i + 1}</span><span>${fmtLap(l.time)}</span><span>${diff}</span>`;
-    row.title = 'クリック: 比較に選ぶ / ダブルクリック: 頭出し';
+    row.title = 'クリック / Enter: 比較に選ぶ。ダブルクリック / Shift+Enter: 頭出し';
+    row.tabIndex = 0; // キーボードでも選べるようにする
+    row.setAttribute('role', 'button');
     row.onclick = () => setSelLap(i);
     row.ondblclick = () => setTime(l.start);
+    row.onkeydown = (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      if (e.shiftKey) setTime(l.start); else setSelLap(i);
+    };
     box.appendChild(row);
   });
   updateLapRows();
@@ -1080,7 +1087,7 @@ function load(text, name) {
   updateView();
   CZ = null;
   arrowRot = D.hd[0];
-  T = V.t0;
+  T = circuitOn && D.lap ? V.c0 : V.t0; // サーキットモードは現在のラップしか描かないので、最初のラップの頭から始める
   curLap = circuitOn && D.lap ? lapIndexAt(T) : -1;
   drawTrack();
   layoutChart();
@@ -1124,6 +1131,7 @@ function updateGapInfo() {
 }
 function refreshDistance() {
   computeDistance(D, gapInertial);
+  if (D.lap) D.lap.delta = null; // 比較ラップとの差は走行距離でそろえているので、作り直す
   updateGapInfo();
   $('meta').textContent = $('meta').textContent.replace(/最高 \d+ km\/h \/ [\d.,]+ (m|km)/, `最高 ${Math.round(D.vmax)} km/h / ${fmtKm(D.distance)}`);
   $('vmax').textContent = `${Math.round(D.vmax)} km/h`;
@@ -1145,6 +1153,7 @@ $('gapmode').onchange = (e) => {
   gapInertial = e.target.value === 'inertial';
   if (!D) return;
   refreshDistance();
+  layoutChart();
   if (D.nvalid) drawPath();
   show(T);
 };

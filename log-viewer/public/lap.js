@@ -21,25 +21,62 @@
     return { x, y, lat0, lon0, kx, ky };
   }
 
-  // 点 (px,py)、進行方向 (hx,hy) のゲートを同じ向きに横切る時刻を返す
-  function crossings(d, P, idx, px, py, hx, hy, half) {
+  // 点 (px,py)、進行方向 (hx,hy) のゲートを同じ向きに横切る時刻を返す。
+  // ks(idx 上の位置の昇順の配列)を渡すと、その位置で終わる線分だけを調べる。省略時は全部
+  function crossings(d, P, idx, px, py, hx, hy, half, ks) {
     const out = [];
     const { x, y } = P;
-    let prevS = null, prevI = -1;
-    for (let k = 0; k < idx.length; k++) {
-      const i = idx[k];
-      const s = (x[i] - px) * hx + (y[i] - py) * hy; // 進行方向の距離(ゲートからの符号付き距離)
-      if (prevS !== null && d.t[i] - d.t[prevI] < 2) {
-        if (prevS < 0 && s >= 0) {
-          const f = -prevS / (s - prevS);
-          const cx = x[prevI] + (x[i] - x[prevI]) * f, cy = y[prevI] + (y[i] - y[prevI]) * f;
-          const lat = -(cx - px) * hy + (cy - py) * hx; // ゲート上の横位置
-          if (Math.abs(lat) <= half) out.push({ t: d.t[prevI] + (d.t[i] - d.t[prevI]) * f, off: lat });
-        }
+    const test = (k) => {
+      const prevI = idx[k - 1], i = idx[k];
+      if (!(d.t[i] - d.t[prevI] < 2)) return;
+      const prevS = (x[prevI] - px) * hx + (y[prevI] - py) * hy; // 進行方向の距離(ゲートからの符号付き距離)
+      const s = (x[i] - px) * hx + (y[i] - py) * hy;
+      if (prevS < 0 && s >= 0) {
+        const f = -prevS / (s - prevS);
+        const cx = x[prevI] + (x[i] - x[prevI]) * f, cy = y[prevI] + (y[i] - y[prevI]) * f;
+        const lat = -(cx - px) * hy + (cy - py) * hx; // ゲート上の横位置
+        if (Math.abs(lat) <= half) out.push({ t: d.t[prevI] + (d.t[i] - d.t[prevI]) * f, off: lat });
       }
-      prevS = s; prevI = i;
-    }
+    };
+    if (ks) for (let j = 0; j < ks.length; j++) test(ks[j]);
+    else for (let k = 1; k < idx.length; k++) test(k);
     return out;
+  }
+
+  // 線分(idx 上で隣り合う 2 点)を升目に入れておき、ゲートの近くの線分だけを調べられるようにする。
+  // 候補ごとに全点を見ると、長いログ(十数万点)で読み込みが数秒止まるため
+  const CELL = 50; // m
+  function buildGrid(d, P, idx) {
+    const { x, y } = P;
+    let minX = Infinity, minY = Infinity, maxY = -Infinity;
+    for (const i of idx) { if (x[i] < minX) minX = x[i]; if (y[i] < minY) minY = y[i]; if (y[i] > maxY) maxY = y[i]; }
+    const ny = Math.floor((maxY - minY) / CELL) + 1;
+    const cx = (v) => Math.floor((v - minX) / CELL), cy = (v) => Math.floor((v - minY) / CELL);
+    const cells = new Map();
+    for (let k = 1; k < idx.length; k++) {
+      const a = idx[k - 1], b = idx[k];
+      if (!(d.t[b] - d.t[a] < 2)) continue;
+      const x0 = cx(Math.min(x[a], x[b])), x1 = cx(Math.max(x[a], x[b])), y0 = cy(Math.min(y[a], y[b])), y1 = cy(Math.max(y[a], y[b]));
+      for (let u = x0; u <= x1; u++) for (let v = y0; v <= y1; v++) {
+        const key = u * ny + v;
+        const c = cells.get(key);
+        if (c) c.push(k); else cells.set(key, [k]);
+      }
+    }
+    // (px,py) から half 以内を通りうる線分の位置を、昇順・重複なしで返す
+    return (px, py, half) => {
+      const x0 = cx(px - half), x1 = cx(px + half), y0 = Math.max(0, cy(py - half)), y1 = Math.min(ny - 1, cy(py + half));
+      let ks = null, many = false;
+      for (let u = x0; u <= x1; u++) for (let v = y0; v <= y1; v++) {
+        const c = cells.get(u * ny + v);
+        if (!c) continue;
+        if (!ks) ks = c; else { ks = ks.concat(c); many = true; }
+      }
+      if (!ks) return [];
+      if (!many) return ks;
+      ks.sort((p, q) => p - q);
+      return ks.filter((k, j) => j === 0 || k !== ks[j - 1]);
+    };
   }
 
   function validIdx(d) {
@@ -64,11 +101,18 @@
     return laps;
   }
 
+  // 直前の通過から MIN_LAP 秒以内の通過は、同じ通過のダブりとして捨てる
+  function dropRepeats(cs) {
+    const out = [];
+    for (const c of cs) if (!out.length || c.t - out[out.length - 1].t >= MIN_LAP) out.push(c);
+    return out;
+  }
+
   function scoreGate(cs) {
-    // 間隔が MIN_LAP 以上のものだけ。最頻の周期に近い周回の数を点数にする
+    // 最頻の周期に近い周回の数を点数にする
     const gaps = [];
     for (let i = 1; i < cs.length; i++) gaps.push(cs[i].t - cs[i - 1].t);
-    if (gaps.length < 2 || gaps.some((g) => g < MIN_LAP)) return null;
+    if (gaps.length < 2) return null;
     const sorted = gaps.slice().sort((a, b) => a - b);
     const med = sorted[sorted.length >> 1];
     const near = gaps.filter((g) => Math.abs(g - med) < med * 0.25);
@@ -103,6 +147,7 @@
     const idx = validIdx(d);
     const cum = new Float64Array(idx.length); // 走行距離(位置の差の積算)
     for (let k = 1; k < idx.length; k++) cum[k] = cum[k - 1] + Math.hypot(P.x[idx[k]] - P.x[idx[k - 1]], P.y[idx[k]] - P.y[idx[k - 1]]);
+    const near = buildGrid(d, P, idx);
     const cands = [];
     let nextT = -1e9;
     for (let k = 0; k < idx.length; k++) {
@@ -112,7 +157,7 @@
       nextT = d.t[i] + CAND_STEP;
       const h = headingAt(d, P, idx, k);
       if (!h) continue;
-      const cs = crossings(d, P, idx, P.x[i], P.y[i], h[0], h[1], half);
+      const cs = dropRepeats(crossings(d, P, idx, P.x[i], P.y[i], h[0], h[1], half, near(P.x[i], P.y[i], half)));
       if (cs.length < 3) continue;
       const sc = scoreGate(cs);
       if (!sc) continue;
