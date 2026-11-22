@@ -1006,8 +1006,9 @@ function applyLapChange() {
   });
   mc.addEventListener('pointermove', (e) => { if (lp && Math.hypot(e.clientX - lp.x, e.clientY - lp.y) > LONG_PRESS_MOVE) cancel(); });
   for (const t of ['pointerup', 'pointercancel', 'pointerleave']) mc.addEventListener(t, cancel);
-  // 押下が終わったら「もう開いた」を消す(このあとキーボードのメニューキーなど、押下なしで来る contextmenu を捨てない)
-  for (const t of ['pointerup', 'pointercancel']) mc.addEventListener(t, () => { opened = false; });
+  // 押下が終わったら「もう開いた」を消す(このあとキーボードのメニューキーなど、押下なしで来る contextmenu を捨てない)。
+  // 地図の外で離しても届くよう、window で受ける
+  for (const t of ['pointerup', 'pointercancel']) window.addEventListener(t, () => { opened = false; });
   map.on('contextmenu', (e) => { // 右クリック、スマホの長押し
     cancel(); // contextmenu が先に来たら、長押しのタイマーは止める
     if (!opened) lapMenu(e.latlng);
