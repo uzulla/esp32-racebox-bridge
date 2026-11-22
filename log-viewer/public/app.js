@@ -879,24 +879,44 @@ function drawPath() {
     return Math.max(MIN, Math.min(window.innerHeight * 0.7, room));
   };
   let want = DEF; // 選んだ高さ。ウィンドウが低いときは表示だけ縮め、広げたらこの高さに戻す
-  const set = (h, save) => {
-    h = Math.round(Math.min(maxH(), Math.max(MIN, h)));
-    if (save) { want = h; try { localStorage.setItem('lapPanelHeight', String(h)); } catch (e) { /* 無視 */ } }
-    panel.style.height = h + 'px';
+  const clamp = (h) => Math.round(Math.min(maxH(), Math.max(MIN, h)));
+  const show = (h) => { // 表示だけ変える(選んだ高さは変えない)
+    panel.style.height = clamp(h) + 'px';
     map.invalidateSize(); // 地図の高さが変わる
   };
-  window.addEventListener('resize', () => set(want, false)); // ウィンドウの大きさが変わったら、上限に合わせ直す
-  try { const v = +localStorage.getItem('lapPanelHeight'); if (v) { want = Math.max(MIN, v); set(want, false); } } catch (e) { /* 既定 */ }
+  const choose = (h) => { // 選んだ高さを変えて、覚える
+    want = Math.max(MIN, Math.round(h));
+    try { localStorage.setItem('lapPanelHeight', String(want)); } catch (e) { /* 無視 */ }
+    show(want);
+  };
+  try { const v = +localStorage.getItem('lapPanelHeight'); if (v) want = Math.max(MIN, v); } catch (e) { /* 既定 */ }
+  show(want);
+  // ウィンドウの大きさや、上のバー・下の再生欄の高さ(ログを読むと変わる、幅が狭いと折り返す)が変わったら、上限に合わせ直す
+  window.addEventListener('resize', () => show(want));
+  if (window.ResizeObserver) {
+    const ro = new ResizeObserver(() => show(want));
+    ro.observe(document.querySelector('header')); ro.observe(document.querySelector('footer'));
+  }
   let drag = null;
   grip.addEventListener('pointerdown', (e) => {
     e.preventDefault(); grip.setPointerCapture(e.pointerId); grip.classList.add('drag');
-    drag = { y: e.clientY, h: panel.getBoundingClientRect().height };
+    drag = { y: e.clientY, h: panel.getBoundingClientRect().height, moved: false };
   });
-  grip.addEventListener('pointermove', (e) => { if (drag) set(drag.h - (e.clientY - drag.y), false); }); // 上へドラッグ = 高く
-  const end = () => { if (!drag) return; drag = null; grip.classList.remove('drag'); set(panel.getBoundingClientRect().height, true); };
+  grip.addEventListener('pointermove', (e) => { // 上へドラッグ = 高く
+    if (!drag || (!drag.moved && e.clientY === drag.y)) return;
+    drag.moved = true;
+    show(drag.h - (e.clientY - drag.y));
+  });
+  // 動かしたときだけ、今の表示の高さを選んだ高さにする(取っ手を押しただけでは、縮めて表示している高さで上書きしない)
+  const end = () => {
+    if (!drag) return;
+    const moved = drag.moved;
+    drag = null; grip.classList.remove('drag');
+    if (moved) choose(panel.getBoundingClientRect().height);
+  };
   grip.addEventListener('pointerup', end);
   grip.addEventListener('pointercancel', end);
-  grip.addEventListener('dblclick', () => set(DEF, true));
+  grip.addEventListener('dblclick', () => choose(DEF));
 })();
 
 // ---- 計測ラインを地図で指定する(軌跡の上を長押し / 右クリック → メニュー) ----
@@ -986,6 +1006,8 @@ function applyLapChange() {
   });
   mc.addEventListener('pointermove', (e) => { if (lp && Math.hypot(e.clientX - lp.x, e.clientY - lp.y) > LONG_PRESS_MOVE) cancel(); });
   for (const t of ['pointerup', 'pointercancel', 'pointerleave']) mc.addEventListener(t, cancel);
+  // 押下が終わったら「もう開いた」を消す(このあとキーボードのメニューキーなど、押下なしで来る contextmenu を捨てない)
+  for (const t of ['pointerup', 'pointercancel']) mc.addEventListener(t, () => { opened = false; });
   map.on('contextmenu', (e) => { // 右クリック、スマホの長押し
     cancel(); // contextmenu が先に来たら、長押しのタイマーは止める
     if (!opened) lapMenu(e.latlng);
