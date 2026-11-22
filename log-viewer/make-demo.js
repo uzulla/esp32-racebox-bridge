@@ -1,35 +1,72 @@
 #!/usr/bin/env node
-// 動作確認用の合成ログ logs/demo.csv を作る(実在の場所ではない周回コース、約 70 秒、25Hz)。
+// 動作確認用の合成ログ logs/demo.csv を作る(実在の場所ではないコース、約 180 秒、25Hz)。
+// コースは直線 2 本と半円 2 つ(右回り)。カーブでは車体が内側を向き(スリップ)、後半の周ほど大きく滑る。
+// ジャイロにはバイアスとノイズを足してある(車体の向きの推定が補正できるかを見るため)。
 const fs = require('fs');
 const path = require('path');
 
-const HZ = 25, SECONDS = 70;
+const HZ = 25, SECONDS = 180;
 const lat0 = 35.0, lon0 = 139.0; // 仮の座標
-const R = 150;                    // 周回の半径(m)
+const L = 220, R = 60;            // 直線の長さ、カーブの半径(m)
+const LAP = 2 * L + 2 * Math.PI * R;
 const mPerDegLat = 111320, mPerDegLon = 111320 * Math.cos(lat0 * Math.PI / 180);
+const GYRO_BIAS = 0.4;            // deg/s
+let seed = 7;
+const noise = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 2 ** 32 * 2 - 1; };
 
-// 最初の 3 秒は静止(G の基準に使われる)、その後 3 秒かけて発進し、8〜22 m/s で周回
-const speedAt = (t) => Math.min(1, Math.max(0, (t - 3) / 3)) * (8 + 14 * (0.5 - 0.5 * Math.cos(t * 2 * Math.PI / 23)));
+// 走行距離 u(周の中の位置)→ 位置(東, 北 m)、進行方向(北から時計回り deg)、カーブ中か・カーブの進み具合
+function place(u) {
+  if (u < L) return { x: 0, y: u, course: 0, frac: -1 };
+  u -= L;
+  if (u < Math.PI * R) { const a = u / R; return { x: R - R * Math.cos(a), y: L + R * Math.sin(a), course: a * 180 / Math.PI, frac: u / (Math.PI * R) }; }
+  u -= Math.PI * R;
+  if (u < L) return { x: 2 * R, y: L - u, course: 180, frac: -1 };
+  u -= L;
+  const a = u / R;
+  return { x: R + R * Math.cos(a), y: -R * Math.sin(a), course: 180 + a * 180 / Math.PI, frac: u / (Math.PI * R) };
+}
+// 速度(m/s): 最初の 3 秒は静止(G の基準に使われる)、3 秒かけて発進。直線 25 m/s、カーブ 15 m/s(前後 40 m でつなぐ)
+function targetSpeed(u) {
+  const p = place(u);
+  if (p.frac >= 0) return 15;
+  const inStraight = u % (L + Math.PI * R);
+  const toCurve = Math.min(inStraight, L - inStraight);
+  return 15 + 10 * Math.min(1, toCurve / 40);
+}
+
 const rows = [];
-let theta = 0;
 const start = Date.UTC(2026, 0, 1, 0, 0, 0);
+let s = 0, prevV = 0, prevBody = 0, lapNo = 0;
 for (let i = 0; i < HZ * SECONDS; i++) {
   const t = i / HZ;
-  const v = speedAt(t);
-  const w = v / R;
-  theta += w / HZ;
-  const x = R * Math.cos(theta), y = R * Math.sin(theta);
-  const lat = lat0 + (y / mPerDegLat), lon = lon0 + (x / mPerDegLon);
-  // 位置は (R cosθ, R sinθ)(東, 北)で θ が増える向き(左回り)に進むので、進行方向は (-sinθ, cosθ) = 方位 -θ
-  const heading = ((-theta * 180 / Math.PI) % 360 + 360) % 360;
-  const dv = (v - speedAt(t - 1 / HZ)) * HZ;
-  // 加速度は車の座標(x = 前, y = 左, z = 上)。左回りなので遠心力ではなく向心加速度は左向き(+y)
-  const gLat = v * w / 9.80665, gLon = dv / 9.80665;
+  const ramp = Math.min(1, Math.max(0, (t - 3) / 3));
+  const v = ramp * targetSpeed(s % LAP);
+  const p = place(s % LAP);
+  lapNo = Math.floor(s / LAP);
+  // スリップ: カーブの中ほどで最大。周ごとに 3°, 7.5°, 12°, 15° と大きくする(右回りなので車体は右 = +)
+  const slip = p.frac >= 0 ? Math.min(15, 3 + 4.5 * lapNo) * Math.sin(Math.PI * p.frac) : 0;
+  const body = p.course + slip;
+  // 加速度(世界: 東 / 北)= 進行方向の加速 + 向心加速度(右カーブなので右向き)
+  const cr = p.course * Math.PI / 180;
+  const fwdW = [Math.sin(cr), Math.cos(cr)], rightW = [Math.cos(cr), -Math.sin(cr)];
+  const at = (v - prevV) * HZ, an = p.frac >= 0 ? v * v / R : 0;
+  const A = [fwdW[0] * at + rightW[0] * an, fwdW[1] * at + rightW[1] * an];
+  // 車の座標(x = 前, y = 左, z = 上)に直す。車体は進行方向から slip だけ右を向いている
+  const br = body * Math.PI / 180;
+  const fwdB = [Math.sin(br), Math.cos(br)], leftB = [-Math.cos(br), Math.sin(br)];
+  const ax = (A[0] * fwdB[0] + A[1] * fwdB[1]) / 9.80665, ay = (A[0] * leftB[0] + A[1] * leftB[1]) / 9.80665;
+  // ジャイロ z(上向き軸、左回り +)= 車体の向きの変化(時計回り)の符号を反転
+  const yawCw = i ? (((body - prevBody) % 360 + 540) % 360 - 180) * HZ : 0;
+  const gz = -yawCw + GYRO_BIAS + 0.3 * noise();
+  const lat = lat0 + p.y / mPerDegLat, lon = lon0 + p.x / mPerDegLon;
+  const course = ((p.course + (v > 1 ? 0.2 * noise() : 0)) % 360 + 360) % 360;
   const utc = new Date(start + i * 1000 / HZ).toISOString();
   rows.push([
     Math.round(t * 1000), utc, 3, 12, lat.toFixed(7), lon.toFixed(7), '100.0', (v * 3.6).toFixed(2),
-    heading.toFixed(2), '1.2', gLon.toFixed(3), gLat.toFixed(3), '0.995', '0.00', '0.00', (w * 180 / Math.PI).toFixed(2), 90, 0,
+    course.toFixed(2), '1.2', (ax + 0.005 * noise()).toFixed(3), (ay + 0.005 * noise()).toFixed(3), (0.995 + 0.005 * noise()).toFixed(3),
+    (0.1 * noise() + GYRO_BIAS / 2).toFixed(2), (0.1 * noise()).toFixed(2), gz.toFixed(2), 90, 0,
   ].join(','));
+  s += v / HZ; prevV = v; prevBody = body;
 }
 const out = [
   '# session 0 seq 0',
@@ -40,4 +77,4 @@ const out = [
 ].join('\n') + '\n';
 fs.mkdirSync(path.join(__dirname, 'logs'), { recursive: true });
 fs.writeFileSync(path.join(__dirname, 'logs', 'demo.csv'), out);
-console.log(`logs/demo.csv: ${rows.length} rows`);
+console.log(`logs/demo.csv: ${rows.length} rows, ${(s / LAP).toFixed(1)} laps`);

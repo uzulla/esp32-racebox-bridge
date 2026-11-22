@@ -169,6 +169,7 @@
     const maxNear = Math.max(...cands.map((c) => c.sc.nNear));
     // 周回が取れている(最多の 9 割以上)ゲートだけを対象に、最も直線的な点を選ぶ。曲がりが同程度なら速い方
     const ok = cands.filter((c) => c.sc.nNear >= Math.max(3, maxNear * 0.9));
+    if (!ok.length) return null; // どのゲートも 3 周に満たない
     let best = ok[0];
     for (const c of ok) if (c.bend < best.bend - 1 || (Math.abs(c.bend - best.bend) <= 1 && c.speed > best.speed)) best = c;
     const lat = best.y / P.ky + P.lat0, lon = best.x / P.kx + P.lon0;
@@ -178,6 +179,35 @@
     return { gate: { lat, lon, heading: Math.atan2(best.hx, best.hy) * 180 / Math.PI, a: end(1), b: end(-1), half, bend: best.bend }, crossings: best.cs, laps, score: best.sc };
   }
 
-  const api = { detect, project, crossings };
+  // 指定した場所(地図で選んだ点)に計測ラインを置く。軌跡の最も近い点(maxDist m 以内)で、その点の進行方向に直交させる。
+  // 戻り値は detect と同じ形(gate.manual = true)。近くに軌跡が無ければ { error: 'far' }、2 回以上通っていなければ { error: 'few', gate, crossings }
+  function gateAt(d, lat, lon, opts) {
+    opts = opts || {};
+    const half = opts.half || GATE_HALF, maxDist = opts.maxDist || 30;
+    const P = project(d);
+    const idx = validIdx(d);
+    if (idx.length < 2) return { error: 'far' };
+    const qx = (lon - P.lon0) * P.kx, qy = (lat - P.lat0) * P.ky;
+    let bestK = -1, bestD = Infinity;
+    for (let k = 0; k < idx.length; k++) {
+      const i = idx[k];
+      if (d.speed[i] < 5) continue; // 止まっている点は向きが決まらない
+      const dd = Math.hypot(P.x[i] - qx, P.y[i] - qy);
+      if (dd < bestD) { bestD = dd; bestK = k; }
+    }
+    if (bestK < 0 || bestD > maxDist) return { error: 'far' };
+    const i = idx[bestK];
+    const h = headingAt(d, P, idx, bestK);
+    if (!h) return { error: 'far' };
+    const px = P.x[i], py = P.y[i];
+    const cs = dropRepeats(crossings(d, P, idx, px, py, h[0], h[1], half));
+    const nx = -h[1], ny = h[0];
+    const end = (sgn) => ({ lat: (py + ny * half * sgn) / P.ky + P.lat0, lon: (px + nx * half * sgn) / P.kx + P.lon0 });
+    const gate = { lat: py / P.ky + P.lat0, lon: px / P.kx + P.lon0, heading: Math.atan2(h[0], h[1]) * 180 / Math.PI, a: end(1), b: end(-1), half, manual: true };
+    if (cs.length < 2) return { error: 'few', gate, crossings: cs };
+    return { gate, crossings: cs, laps: lapsFromCrossings(cs), score: null };
+  }
+
+  const api = { detect, gateAt, project, crossings };
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.Lap = api;
 })(typeof self !== 'undefined' ? self : this);
