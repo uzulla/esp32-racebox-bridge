@@ -507,8 +507,8 @@ function storeSet(key, value) {
   try { localStorage.setItem(key, value); delete memStore[key]; } catch (e) { memStore[key] = value; }
 }
 function storeDel(key) {
-  delete memStore[key];
-  try { localStorage.removeItem(key); } catch (e) { /* 無視 */ }
+  // 消せなかったときは「消した」ことをメモリに覚えておく(保存に残った古い値を読み直さない)
+  try { localStorage.removeItem(key); delete memStore[key]; } catch (e) { memStore[key] = null; }
 }
 const gateKey = (name) => 'lapGate:' + name;
 function savedGate(name) {
@@ -865,6 +865,9 @@ function drawPath() {
   L.circleMarker([D.lat[e], D.lon[e]], { radius: 6, color: '#fff', fillColor: '#ff4646', fillOpacity: 1, weight: 2 }).bindTooltip('END').addTo(trackLayer);
   if (D.lap) drawGate();
 }
+
+// セクターが多くて表が横にはみ出したときは、見出しも行と一緒に横へ動かす
+$('laps').addEventListener('scroll', () => { $('lapshead').scrollLeft = $('laps').scrollLeft; });
 
 // ---- ラップ表の高さ(上端の取っ手をドラッグ。ブラウザに覚えておく) ----
 (function () {
@@ -1263,13 +1266,22 @@ function layoutChart() {
     c.strokeStyle = '#4a526e'; c.lineWidth = 1; c.beginPath(); c.moveTo(padL, ym); c.lineTo(w - padR, ym); c.stroke();
     c.strokeStyle = '#ff9628'; c.lineWidth = 1.5; c.beginPath();
     let started = false;
+    const yOf = (v) => ym - Math.max(-1, Math.min(1, v / sc)) * half;
     for (let i = i0; i < i1; i += stepV) {
+      const x = xOf(D.t[i]);
       let lo = Infinity, hi = -Infinity; // 間引いても短いピークを残す
-      for (let j = i; j < Math.min(i1, i + stepV); j++) { const v = D.hdg.slip[j]; if (isFinite(v)) { if (v < lo) lo = v; if (v > hi) hi = v; } }
-      if (lo === Infinity) { started = false; continue; }
-      const x = xOf(D.t[i]), yOf = (v) => ym - Math.max(-1, Math.min(1, v / sc)) * half;
-      if (!started) { c.moveTo(x, yOf(lo)); started = true; } else c.lineTo(x, yOf(lo));
-      if (hi !== lo) c.lineTo(x, yOf(hi));
+      const flush = () => {
+        if (lo === Infinity) return;
+        if (!started) { c.moveTo(x, yOf(lo)); started = true; } else c.lineTo(x, yOf(lo));
+        if (hi !== lo) c.lineTo(x, yOf(hi));
+        lo = Infinity; hi = -Infinity;
+      };
+      for (let j = i; j < Math.min(i1, i + stepV); j++) {
+        const v = D.hdg.slip[j];
+        if (isFinite(v)) { if (v < lo) lo = v; if (v > hi) hi = v; }
+        else { flush(); started = false; } // 推定できない行で線を切る(間引きの 1 区切りの途中でも、またいでつながない)
+      }
+      flush();
     }
     c.stroke();
   }

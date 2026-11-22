@@ -54,7 +54,7 @@
   .lphead { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; margin-bottom: 4px; }
   #lapsum { font-size: 13px; font-variant-numeric: tabular-nums; }
   #lapshead, .lap { display: grid; grid-template-columns: var(--cols, 3em 6.5em 5.5em); gap: 8px; padding: 2px 4px; font-variant-numeric: tabular-nums; font-size: 13px; }
-  #lapshead { color: var(--dim); font-size: 12px; border-bottom: 1px solid var(--line); }
+  #lapshead { color: var(--dim); border-bottom: 1px solid var(--line); overflow: hidden; } /* 列の幅は em なので、文字の大きさは行と同じにする */
   #lapshead span:not(:first-child), .lap span:not(:first-child) { text-align: right; }
   #laps { overflow-y: auto; min-height: 0; flex: 1; }
   .lap { cursor: pointer; border-radius: 4px; }
