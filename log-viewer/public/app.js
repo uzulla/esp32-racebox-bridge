@@ -581,8 +581,10 @@ function computeSectors(d) {
 // ベスト・平均・参考扱いの周回を付ける
 function lapStats(r) {
   const times = r.laps.map((l) => l.time).sort((a, b) => a - b);
-  const med = times[times.length >> 1];
-  // 中央値の 1.25 倍を超える周回(ピット、スピン、検出漏れ)は参考扱いにして、ベストと平均から外す
+  // 偶数個のときは中央 2 つの速い方を中央値にする。遅い方を取ると、2 周のログで速い方の周回が「速すぎる」として
+  // 参考扱いになり、ベストから外れる(おかしな周回はピットやスピンで遅くなる方が多いので、速い側を基準にする)
+  const med = times[(times.length - 1) >> 1];
+  // 中央値の 1.25 倍を超える周回(ピット、スピン、検出漏れ)と 0.75 倍に満たない周回は参考扱いにして、ベストと平均から外す
   for (const l of r.laps) l.outlier = l.time > med * 1.25 || l.time < med * 0.75;
   const good = r.laps.filter((l) => !l.outlier);
   r.median = med;
@@ -869,36 +871,59 @@ function drawPath() {
 // ---- ラップ表の高さ(上端の取っ手をドラッグ。ブラウザに覚えておく) ----
 (function () {
   const panel = $('lappanel'), grip = $('lpresize');
-  const DEF = 200, MIN = 60;
-  const maxH = () => Math.max(MIN, window.innerHeight * 0.7);
-  const set = (h, save) => {
-    h = Math.round(Math.min(maxH(), Math.max(MIN, h)));
-    panel.style.height = h + 'px';
-    map.invalidateSize(); // 地図の高さが変わる
-    if (save) try { localStorage.setItem('lapPanelHeight', String(h)); } catch (e) { /* 無視 */ }
+  const DEF = 200, MIN = 60, MAP_MIN = 120; // px。MAP_MIN: ラップ表を高くしても地図に残す高さ
+  // ウィンドウの高さの 7 割まで。ただし地図が MAP_MIN より低くならない範囲
+  // (ウィンドウから上のバーと下の再生・グラフを引いた残りを、地図とラップ表で分け合う)
+  const maxH = () => {
+    const room = window.innerHeight - document.querySelector('header').offsetHeight - document.querySelector('footer').offsetHeight - MAP_MIN;
+    return Math.max(MIN, Math.min(window.innerHeight * 0.7, room));
   };
-  try { const v = +localStorage.getItem('lapPanelHeight'); if (v) set(v, false); } catch (e) { /* 既定 */ }
+  let want = DEF; // 選んだ高さ。ウィンドウが低いときは表示だけ縮め、広げたらこの高さに戻す
+  const clamp = (h) => Math.round(Math.min(maxH(), Math.max(MIN, h)));
+  const show = (h) => { // 表示だけ変える(選んだ高さは変えない)
+    panel.style.height = clamp(h) + 'px';
+    map.invalidateSize(); // 地図の高さが変わる
+  };
+  const choose = (h) => { // 選んだ高さを変えて、覚える
+    want = Math.max(MIN, Math.round(h));
+    try { localStorage.setItem('lapPanelHeight', String(want)); } catch (e) { /* 無視 */ }
+    show(want);
+  };
+  try { const v = +localStorage.getItem('lapPanelHeight'); if (v) want = Math.max(MIN, v); } catch (e) { /* 既定 */ }
+  show(want);
+  // ウィンドウの大きさや、上のバー・下の再生欄の高さ(ログを読むと変わる、幅が狭いと折り返す)が変わったら、上限に合わせ直す
+  window.addEventListener('resize', () => show(want));
+  if (window.ResizeObserver) {
+    const ro = new ResizeObserver(() => show(want));
+    ro.observe(document.querySelector('header')); ro.observe(document.querySelector('footer'));
+  }
   let drag = null;
   grip.addEventListener('pointerdown', (e) => {
     e.preventDefault(); grip.setPointerCapture(e.pointerId); grip.classList.add('drag');
-    drag = { y: e.clientY, h: panel.getBoundingClientRect().height };
+    drag = { y: e.clientY, h: panel.getBoundingClientRect().height, moved: false };
   });
-  grip.addEventListener('pointermove', (e) => { if (drag) set(drag.h - (e.clientY - drag.y), false); }); // 上へドラッグ = 高く
-  const end = () => { if (!drag) return; drag = null; grip.classList.remove('drag'); set(panel.getBoundingClientRect().height, true); };
+  grip.addEventListener('pointermove', (e) => { // 上へドラッグ = 高く
+    if (!drag || (!drag.moved && e.clientY === drag.y)) return;
+    drag.moved = true;
+    show(drag.h - (e.clientY - drag.y));
+  });
+  // 動かしたときだけ、今の表示の高さを選んだ高さにする(取っ手を押しただけでは、縮めて表示している高さで上書きしない)
+  const end = () => {
+    if (!drag) return;
+    const moved = drag.moved;
+    drag = null; grip.classList.remove('drag');
+    if (moved) choose(panel.getBoundingClientRect().height);
+  };
   grip.addEventListener('pointerup', end);
   grip.addEventListener('pointercancel', end);
-  grip.addEventListener('dblclick', () => set(DEF, true));
+  grip.addEventListener('dblclick', () => choose(DEF));
 })();
 
 // ---- 計測ラインを地図で指定する(軌跡の上を長押し / 右クリック → メニュー) ----
 // スマホでも使えるよう、長押しを基本にする(Android は長押しで contextmenu、iPhone は Leaflet が長押しを contextmenu にする)
 const LONG_PRESS_MS = 600, LONG_PRESS_MOVE = 8; // ミリ秒 / px。この間に指やマウスが動いたら地図の移動とみなす
-let lastMenuAt = 0;
 function lapMenu(latlng) {
   if (!D || !D.nvalid) return;
-  const now = performance.now();
-  if (now - lastMenuAt < 700) return; // 長押しと contextmenu が両方来たときに 2 回開かない
-  lastMenuAt = now;
   const box = document.createElement('div');
   box.className = 'mapmenu';
   const add = (label, fn) => {
@@ -968,17 +993,26 @@ function applyLapChange() {
 }
 (function () {
   const mc = map.getContainer();
-  let lp = null;
+  // 1 回の長押しで、長押しのタイマーと contextmenu の両方が来ることがある。同じ押下の 2 つ目だけを捨てる
+  // (時間で区切ると、続けて素早く開いたメニューまで捨ててしまう)
+  let lp = null, opened = false; // opened: 今の押下で、長押しのタイマーがもうメニューを開いた
   const cancel = () => { if (lp) { clearTimeout(lp.timer); lp = null; } };
   mc.addEventListener('pointerdown', (e) => {
     cancel();
+    opened = false;
     if (e.button !== 0 || e.target.closest('.leaflet-control, .leaflet-popup')) return;
     const at = map.mouseEventToLatLng(e);
-    lp = { x: e.clientX, y: e.clientY, timer: setTimeout(() => { lp = null; lapMenu(at); }, LONG_PRESS_MS) };
+    lp = { x: e.clientX, y: e.clientY, timer: setTimeout(() => { lp = null; opened = true; lapMenu(at); }, LONG_PRESS_MS) };
   });
   mc.addEventListener('pointermove', (e) => { if (lp && Math.hypot(e.clientX - lp.x, e.clientY - lp.y) > LONG_PRESS_MOVE) cancel(); });
   for (const t of ['pointerup', 'pointercancel', 'pointerleave']) mc.addEventListener(t, cancel);
-  map.on('contextmenu', (e) => lapMenu(e.latlng)); // 右クリック、スマホの長押し
+  // 押下が終わったら「もう開いた」を消す(このあとキーボードのメニューキーなど、押下なしで来る contextmenu を捨てない)。
+  // 地図の外で離しても届くよう、window で受ける
+  for (const t of ['pointerup', 'pointercancel']) window.addEventListener(t, () => { opened = false; });
+  map.on('contextmenu', (e) => { // 右クリック、スマホの長押し
+    cancel(); // contextmenu が先に来たら、長押しのタイマーは止める
+    if (!opened) lapMenu(e.latlng);
+  });
 })();
 
 function drawGate() {
