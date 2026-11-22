@@ -497,9 +497,22 @@ function build(rows, name) {
 // ---- ラップ ----
 // コースの事前情報なしで、軌跡から計測ラインを自動で見つける(lap.js)。位置は GPS の生の値で見る(停止固定の切り替えに左右されない)
 // 計測ラインを手動で置いたログは、その場所(緯度経度)をブラウザに覚えておく(ログのファイル名ごと)
+// localStorage が使えない(保存できない)ブラウザでは、ページを開いている間だけメモリに覚えておく
+const memStore = {};
+function storeGet(key) {
+  if (key in memStore) return memStore[key];
+  try { return localStorage.getItem(key); } catch (e) { return null; }
+}
+function storeSet(key, value) {
+  try { localStorage.setItem(key, value); delete memStore[key]; } catch (e) { memStore[key] = value; }
+}
+function storeDel(key) {
+  delete memStore[key];
+  try { localStorage.removeItem(key); } catch (e) { /* 無視 */ }
+}
 const gateKey = (name) => 'lapGate:' + name;
 function savedGate(name) {
-  try { const v = JSON.parse(localStorage.getItem(gateKey(name))); return v && isFinite(v.lat) && isFinite(v.lon) ? v : null; } catch (e) { return null; }
+  try { const v = JSON.parse(storeGet(gateKey(name))); return v && isFinite(v.lat) && isFinite(v.lon) ? v : null; } catch (e) { return null; }
 }
 function detectLaps(d) {
   d.lap = null;
@@ -521,11 +534,12 @@ function detectLaps(d) {
 // 地図で置いた区切り(緯度経度)をログのファイル名ごとに覚えておく。区切りごとに計測ラインと同じゲートを置き、
 // 各ラップの中で最初に横切った時刻で区切る。区切りの順番は、ラップの中での位置(平均)で決める
 const sectorKey = (name) => 'sectors:' + name;
+const SECTOR_MIN_DIST = 10; // m。これより近い区切りは同じ場所とみなす(同じ時刻に横切り、セクターにならない)
 function savedSectors(name) {
-  try { const v = JSON.parse(localStorage.getItem(sectorKey(name))); return Array.isArray(v) ? v.filter((p) => p && isFinite(p.lat) && isFinite(p.lon)) : []; } catch (e) { return []; }
+  try { const v = JSON.parse(storeGet(sectorKey(name))); return Array.isArray(v) ? v.filter((p) => p && isFinite(p.lat) && isFinite(p.lon)) : []; } catch (e) { return []; }
 }
 function storeSectors(name, list) {
-  try { if (list.length) localStorage.setItem(sectorKey(name), JSON.stringify(list)); else localStorage.removeItem(sectorKey(name)); } catch (e) { /* 無視 */ }
+  if (list.length) storeSet(sectorKey(name), JSON.stringify(list)); else storeDel(sectorKey(name));
 }
 const lapSrc = (d) => ({ n: d.n, t: d.t, lat: d.rLat, lon: d.rLon, speed: d.rSpeed, valid: d.valid });
 function computeSectors(d) {
@@ -536,6 +550,7 @@ function computeSectors(d) {
   const src = lapSrc(d);
   const ms = [];
   for (const m of marks) {
+    if (ms.some((x) => haversine(x.lat, x.lon, m.lat, m.lon) < SECTOR_MIN_DIST)) continue; // 同じ場所の区切りは 1 つにする
     const r = Lap.gateAt(src, m.lat, m.lon);
     if (r.error === 'far') continue;
     // ラップごとに、その中で最初に横切った時刻
@@ -912,11 +927,11 @@ function setManualGate(latlng) {
       $('notice').textContent = r.error === 'far' ? '計測ラインは軌跡の近く(30 m 以内)を長押ししてください' : 'その場所を 2 回以上通っていないため、ラップになりません';
       return;
     }
-    try { localStorage.setItem(gateKey(D.name), JSON.stringify({ lat: r.gate.lat, lon: r.gate.lon })); } catch (e) { /* 覚えられなくても今回は使う */ }
+    storeSet(gateKey(D.name), JSON.stringify({ lat: r.gate.lat, lon: r.gate.lon }));
     detectLaps(D);
     if (!D.lap || !D.lap.gate.manual) { D.lap = lapStats(r); computeSectors(D); } // localStorage が使えないとき(セクターも新しいラップで)
   } else {
-    try { localStorage.removeItem(gateKey(D.name)); } catch (e) { /* 無視 */ }
+    storeDel(gateKey(D.name));
     detectLaps(D);
   }
   $('notice').textContent = '';
@@ -928,10 +943,14 @@ function addSector(latlng) {
   const r = Lap.gateAt(lapSrc(D), latlng.lat, latlng.lng);
   if (r.error === 'far') { $('notice').textContent = 'セクターの区切りは軌跡の近く(30 m 以内)を長押ししてください'; return; }
   const marks = savedSectors(D.name);
-  marks.push({ lat: r.gate.lat, lon: r.gate.lon });
+  const mark = { lat: r.gate.lat, lon: r.gate.lon };
+  if (marks.some((m) => haversine(m.lat, m.lon, mark.lat, mark.lon) < SECTOR_MIN_DIST)) { $('notice').textContent = 'その場所には、すでにセクターの区切りがあります'; return; }
+  marks.push(mark);
   storeSectors(D.name, marks);
   computeSectors(D);
-  $('notice').textContent = D.sectors && D.sectors.marks.length === marks.length ? '' : 'その場所はラップの中で通っていないため、セクターになりません';
+  // 今置いた区切りが使われたかで判断する(以前に置いて使われなかった区切りが残っていても、関係なく)
+  const used = D.sectors && D.sectors.marks.some((m) => m.lat === mark.lat && m.lon === mark.lon);
+  $('notice').textContent = used ? '' : 'その場所はラップの中で通っていないため、セクターになりません';
   applyLapChange();
 }
 // ラップが変わったら、表示範囲・ラップ一覧・地図・グラフを作り直す
@@ -1360,6 +1379,7 @@ window.addEventListener('resize', () => { layoutChart(); show(T); map.invalidate
 
 // ---- 再生 ----
 let T = 0, playing = false, lastFrame = 0;
+let rafId = 0; // 再生のループは常に 1 本(向きを切り替えたときに増やさない)
 let playDir = 1; // 1 = 再生、-1 = 逆再生
 function setTime(t) { T = Math.min(D ? V.t1 : 0, Math.max(D ? V.t0 : 0, t)); show(T); }
 function frame(now) {
@@ -1371,7 +1391,7 @@ function frame(now) {
   if (playDir > 0 && T >= V.t1) { T = V.t1; setPlaying(false); }
   if (playDir < 0 && T <= V.t0) { T = V.t0; setPlaying(false); }
   show(T);
-  if (playing) requestAnimationFrame(frame);
+  if (playing) rafId = requestAnimationFrame(frame);
 }
 // dir: 1 = 再生、-1 = 逆再生(省略時は今の向き)。端にいるときは反対の端から始める
 function setPlaying(p, dir = playDir) {
@@ -1381,7 +1401,8 @@ function setPlaying(p, dir = playDir) {
   playing = p && !!D;
   $('play').textContent = playing && playDir > 0 ? '❚❚' : '▶';
   $('rev').textContent = playing && playDir < 0 ? '❚❚' : '◀';
-  if (playing) { lastFrame = performance.now(); requestAnimationFrame(frame); }
+  cancelAnimationFrame(rafId);
+  if (playing) { lastFrame = performance.now(); rafId = requestAnimationFrame(frame); }
 }
 $('play').onclick = () => setPlaying(!(playing && playDir > 0), 1);
 $('rev').onclick = () => setPlaying(!(playing && playDir < 0), -1);
@@ -1400,7 +1421,10 @@ function stepLap(dir) {
   const starts = D.lap.laps.map((l) => l.start);
   let t;
   if (dir > 0) t = starts.find((s) => s > T + 1e-3);
-  else { const prev = starts.filter((s) => s < T - 1); t = prev.length ? prev[prev.length - 1] : starts[0]; }
+  else { // 最初のラップより前にいるときは動かない(先へ進めない)
+    const prev = starts.filter((s) => s < T - 1);
+    t = prev.length ? prev[prev.length - 1] : (starts[0] <= T ? starts[0] : undefined);
+  }
   if (t !== undefined) setTime(t);
 }
 $('fprev').onclick = () => stepFrame(-1);
@@ -1417,7 +1441,7 @@ $('seek').oninput = (e) => setTime(+e.target.value);
 $('fit').onclick = () => D && fitTrack();
 document.addEventListener('keydown', (e) => {
   if (e.target.tagName === 'SELECT' || e.target.tagName === 'INPUT' && e.target.type !== 'range' && e.target.type !== 'checkbox') return;
-  if (e.code === 'Space') { e.preventDefault(); setPlaying(!playing); }
+  if (e.code === 'Space') { e.preventDefault(); setPlaying(!playing, 1); } // 逆再生のあとでも、再生は順方向
   else if (e.code === 'Comma') stepFrame(-1);
   else if (e.code === 'Period') stepFrame(1);
   else if (e.code === 'BracketLeft') stepLap(-1);
