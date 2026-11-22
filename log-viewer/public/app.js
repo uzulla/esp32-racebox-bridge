@@ -581,8 +581,10 @@ function computeSectors(d) {
 // ベスト・平均・参考扱いの周回を付ける
 function lapStats(r) {
   const times = r.laps.map((l) => l.time).sort((a, b) => a - b);
-  const med = times[times.length >> 1];
-  // 中央値の 1.25 倍を超える周回(ピット、スピン、検出漏れ)は参考扱いにして、ベストと平均から外す
+  // 偶数個のときは中央 2 つの速い方を中央値にする。遅い方を取ると、2 周のログで速い方の周回が「速すぎる」として
+  // 参考扱いになり、ベストから外れる(おかしな周回はピットやスピンで遅くなる方が多いので、速い側を基準にする)
+  const med = times[(times.length - 1) >> 1];
+  // 中央値の 1.25 倍を超える周回(ピット、スピン、検出漏れ)と 0.75 倍に満たない周回は参考扱いにして、ベストと平均から外す
   for (const l of r.laps) l.outlier = l.time > med * 1.25 || l.time < med * 0.75;
   const good = r.laps.filter((l) => !l.outlier);
   r.median = med;
@@ -869,15 +871,22 @@ function drawPath() {
 // ---- ラップ表の高さ(上端の取っ手をドラッグ。ブラウザに覚えておく) ----
 (function () {
   const panel = $('lappanel'), grip = $('lpresize');
-  const DEF = 200, MIN = 60;
-  const maxH = () => Math.max(MIN, window.innerHeight * 0.7);
+  const DEF = 200, MIN = 60, MAP_MIN = 120; // px。MAP_MIN: ラップ表を高くしても地図に残す高さ
+  // ウィンドウの高さの 7 割まで。ただし地図が MAP_MIN より低くならない範囲
+  // (ウィンドウから上のバーと下の再生・グラフを引いた残りを、地図とラップ表で分け合う)
+  const maxH = () => {
+    const room = window.innerHeight - document.querySelector('header').offsetHeight - document.querySelector('footer').offsetHeight - MAP_MIN;
+    return Math.max(MIN, Math.min(window.innerHeight * 0.7, room));
+  };
+  let want = DEF; // 選んだ高さ。ウィンドウが低いときは表示だけ縮め、広げたらこの高さに戻す
   const set = (h, save) => {
     h = Math.round(Math.min(maxH(), Math.max(MIN, h)));
+    if (save) { want = h; try { localStorage.setItem('lapPanelHeight', String(h)); } catch (e) { /* 無視 */ } }
     panel.style.height = h + 'px';
     map.invalidateSize(); // 地図の高さが変わる
-    if (save) try { localStorage.setItem('lapPanelHeight', String(h)); } catch (e) { /* 無視 */ }
   };
-  try { const v = +localStorage.getItem('lapPanelHeight'); if (v) set(v, false); } catch (e) { /* 既定 */ }
+  window.addEventListener('resize', () => set(want, false)); // ウィンドウの大きさが変わったら、上限に合わせ直す
+  try { const v = +localStorage.getItem('lapPanelHeight'); if (v) { want = Math.max(MIN, v); set(want, false); } } catch (e) { /* 既定 */ }
   let drag = null;
   grip.addEventListener('pointerdown', (e) => {
     e.preventDefault(); grip.setPointerCapture(e.pointerId); grip.classList.add('drag');
@@ -893,12 +902,8 @@ function drawPath() {
 // ---- 計測ラインを地図で指定する(軌跡の上を長押し / 右クリック → メニュー) ----
 // スマホでも使えるよう、長押しを基本にする(Android は長押しで contextmenu、iPhone は Leaflet が長押しを contextmenu にする)
 const LONG_PRESS_MS = 600, LONG_PRESS_MOVE = 8; // ミリ秒 / px。この間に指やマウスが動いたら地図の移動とみなす
-let lastMenuAt = 0;
 function lapMenu(latlng) {
   if (!D || !D.nvalid) return;
-  const now = performance.now();
-  if (now - lastMenuAt < 700) return; // 長押しと contextmenu が両方来たときに 2 回開かない
-  lastMenuAt = now;
   const box = document.createElement('div');
   box.className = 'mapmenu';
   const add = (label, fn) => {
@@ -968,17 +973,23 @@ function applyLapChange() {
 }
 (function () {
   const mc = map.getContainer();
-  let lp = null;
+  // 1 回の長押しで、長押しのタイマーと contextmenu の両方が来ることがある。同じ押下の 2 つ目だけを捨てる
+  // (時間で区切ると、続けて素早く開いたメニューまで捨ててしまう)
+  let lp = null, opened = false; // opened: 今の押下で、長押しのタイマーがもうメニューを開いた
   const cancel = () => { if (lp) { clearTimeout(lp.timer); lp = null; } };
   mc.addEventListener('pointerdown', (e) => {
     cancel();
+    opened = false;
     if (e.button !== 0 || e.target.closest('.leaflet-control, .leaflet-popup')) return;
     const at = map.mouseEventToLatLng(e);
-    lp = { x: e.clientX, y: e.clientY, timer: setTimeout(() => { lp = null; lapMenu(at); }, LONG_PRESS_MS) };
+    lp = { x: e.clientX, y: e.clientY, timer: setTimeout(() => { lp = null; opened = true; lapMenu(at); }, LONG_PRESS_MS) };
   });
   mc.addEventListener('pointermove', (e) => { if (lp && Math.hypot(e.clientX - lp.x, e.clientY - lp.y) > LONG_PRESS_MOVE) cancel(); });
   for (const t of ['pointerup', 'pointercancel', 'pointerleave']) mc.addEventListener(t, cancel);
-  map.on('contextmenu', (e) => lapMenu(e.latlng)); // 右クリック、スマホの長押し
+  map.on('contextmenu', (e) => { // 右クリック、スマホの長押し
+    cancel(); // contextmenu が先に来たら、長押しのタイマーは止める
+    if (!opened) lapMenu(e.latlng);
+  });
 })();
 
 function drawGate() {
