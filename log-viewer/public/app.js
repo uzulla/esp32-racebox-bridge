@@ -866,9 +866,6 @@ function drawPath() {
   if (D.lap) drawGate();
 }
 
-// セクターが多くて表が横にはみ出したときは、見出しも行と一緒に横へ動かす
-$('laps').addEventListener('scroll', () => { $('lapshead').scrollLeft = $('laps').scrollLeft; });
-
 // ---- ラップ表の高さ(上端の取っ手をドラッグ。ブラウザに覚えておく) ----
 (function () {
   const panel = $('lappanel'), grip = $('lpresize');

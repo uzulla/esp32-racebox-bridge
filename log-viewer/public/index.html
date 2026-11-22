@@ -53,10 +53,11 @@
   #lpresize:hover::after, #lpresize.drag::after { background: var(--accent); }
   .lphead { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; margin-bottom: 4px; }
   #lapsum { font-size: 13px; font-variant-numeric: tabular-nums; }
-  #lapshead, .lap { display: grid; grid-template-columns: var(--cols, 3em 6.5em 5.5em); gap: 8px; padding: 2px 4px; font-variant-numeric: tabular-nums; font-size: 13px; }
-  #lapshead { color: var(--dim); border-bottom: 1px solid var(--line); overflow: hidden; } /* 列の幅は em なので、文字の大きさは行と同じにする */
+  #lapshead, .lap { display: grid; grid-template-columns: var(--cols, 3em 6.5em 5.5em); gap: 8px; padding: 2px 4px; font-variant-numeric: tabular-nums; font-size: 13px; width: max-content; min-width: 100%; box-sizing: border-box; }
+  /* 見出しと行は同じ枠(#lapscroll)の中でスクロールする: 横は一緒に動き、縦は見出しだけ上に残る。列の幅は em なので、文字の大きさは行と同じにする */
+  #lapscroll { overflow: auto; min-height: 0; flex: 1; }
+  #lapshead { color: var(--dim); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 1; background: var(--panel); }
   #lapshead span:not(:first-child), .lap span:not(:first-child) { text-align: right; }
-  #laps { overflow-y: auto; min-height: 0; flex: 1; }
   .lap { cursor: pointer; border-radius: 4px; }
   .lap .sbest { color: #c77dff; font-weight: 700; }
   .secmark { color: #ffd400; font-size: 11px; font-weight: 700; white-space: nowrap; text-shadow: 0 0 3px #000, 0 0 3px #000; }
@@ -126,8 +127,10 @@
     <h3>ラップ</h3><span id="lapsum">--</span>
     <span class="hint" title="細い線は現在のラップ(赤 = 加速、白 = 加減速なし、青 = 減速)、縁取りのある線は比較ラップ(緑 = 加速、黄 = 減速)。下のグラフに比較ラップとの差(Δ)が出ます">行をクリック(Enter) = 比較に選ぶ / もう一度 = 非表示 / ダブルクリック(Shift+Enter) = 頭出し。地図で軌跡の上を長押し(右クリック) = 計測ライン・セクターの区切りを置く</span>
   </div>
-  <div id="lapshead"></div>
-  <div id="laps"></div>
+  <div id="lapscroll">
+    <div id="lapshead"></div>
+    <div id="laps"></div>
+  </div>
 </section>
 <footer>
   <div id="transport">
