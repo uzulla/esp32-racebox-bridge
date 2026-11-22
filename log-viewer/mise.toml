@@ -6,3 +6,7 @@ node = "lts"
 [tasks.start]
 description = "ログビューワーを起動(http://localhost:3000/)"
 run = 'node server.js "${LOG_DIR:-logs}" "${PORT:-3000}"'
+
+[tasks.test]
+description = "車体の向き・スリップアングル推定(public/heading.js)のテスト"
+run = "node test-heading.js"

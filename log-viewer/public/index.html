@@ -35,23 +35,43 @@
   footer { background: var(--panel); border-top: 1px solid var(--line); padding: 8px 12px; }
   #transport { display: flex; gap: 10px; align-items: center; margin-bottom: 6px; }
   #transport button { min-width: 44px; }
+  #transport button:disabled { opacity: .35; cursor: default; }
   #seek { flex: 1; accent-color: var(--accent); }
   #pos { font-variant-numeric: tabular-nums; color: var(--dim); min-width: 120px; text-align: right; }
-  #chart { width: 100%; height: 180px; display: block; cursor: pointer; }
+  #chart { width: 100%; height: 220px; display: block; cursor: pointer; }
+  #cscroll { position: relative; height: 10px; margin: 4px 8px 0 40px; background: #141b33; border-radius: 5px; cursor: pointer; }
+  #cthumb { position: absolute; top: 0; bottom: 0; background: #4a5a8a; border-radius: 5px; cursor: grab; touch-action: none; }
+  #cthumb:hover { background: var(--accent); }
+  #cscroll.full { cursor: default; } #cscroll.full #cthumb { background: #26304d; cursor: default; }
   label { color: var(--dim); font-size: 12px; user-select: none; }
   #drop { position: fixed; inset: 0; background: rgba(0,205,255,.15); border: 3px dashed var(--accent); display: none; align-items: center; justify-content: center; font-size: 22px; z-index: 2000; pointer-events: none; }
   #notice { color: #ffb000; font-size: 12px; }
-  h3 { font-size: 13px; margin: 16px 0 6px; color: var(--accent); } h3 small { color: var(--dim); font-weight: 400; display: block; }
-  #laps { max-height: 220px; overflow-y: auto; font-variant-numeric: tabular-nums; font-size: 13px; }
-  .lap { display: grid; grid-template-columns: 3em 1fr auto; gap: 8px; padding: 2px 4px; cursor: pointer; border-radius: 4px; }
+  h3 { font-size: 13px; margin: 0; color: var(--accent); }
+  #lappanel { position: relative; background: var(--panel); border-top: 1px solid var(--line); padding: 6px 12px; display: flex; flex-direction: column; height: 200px; min-height: 0; flex: none; }
+  #lpresize { position: absolute; left: 0; right: 0; top: -5px; height: 10px; cursor: ns-resize; touch-action: none; z-index: 500; }
+  #lpresize::after { content: ''; position: absolute; left: 50%; top: 3px; width: 40px; height: 4px; margin-left: -20px; border-radius: 2px; background: var(--line); }
+  #lpresize:hover::after, #lpresize.drag::after { background: var(--accent); }
+  .lphead { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; margin-bottom: 4px; }
+  #lapsum { font-size: 13px; font-variant-numeric: tabular-nums; }
+  #lapshead, .lap { display: grid; grid-template-columns: var(--cols, 3em 6.5em 5.5em); gap: 8px; padding: 2px 4px; font-variant-numeric: tabular-nums; font-size: 13px; }
+  #lapshead { color: var(--dim); font-size: 12px; border-bottom: 1px solid var(--line); }
+  #lapshead span:not(:first-child), .lap span:not(:first-child) { text-align: right; }
+  #laps { overflow-y: auto; min-height: 0; flex: 1; }
+  .lap { cursor: pointer; border-radius: 4px; }
+  .lap .sbest { color: #c77dff; font-weight: 700; }
+  .secmark { color: #ffd400; font-size: 11px; font-weight: 700; white-space: nowrap; text-shadow: 0 0 3px #000, 0 0 3px #000; }
   .hint { color: var(--dim); font-size: 11px; margin-bottom: 4px; }
   .lap.sel { outline: 1px solid var(--accent); background: #1b2b4d; } .lap.cur span:first-child::before { content: '▶'; color: var(--text); font-size: 9px; margin-right: 2px; }
   .lap:focus-visible { outline: 2px solid var(--text); }
-  .lap:hover { background: #1d2744; } .lap.best { color: var(--green); font-weight: 700; } .lap.out { color: var(--dim); } .lap span:last-child { color: var(--dim); }
+  .lap:hover { background: #1d2744; } .lap.best { color: var(--green); font-weight: 700; } .lap.out { color: var(--dim); } .lap .diff { color: var(--dim); }
   .leaflet-tile-pane { opacity: var(--tile-opacity, .55); }
   #map { background: #0f1530; }
-  .arrow { width: 28px; height: 28px; transition: transform .1s linear; }
+  .arrows { position: relative; width: 120px; height: 120px; pointer-events: none; }
+  .arrow { position: absolute; inset: 0; width: 120px; height: 120px; overflow: visible; }
   .leaflet-container { font: inherit; }
+  .mapmenu-popup .leaflet-popup-content-wrapper, .mapmenu-popup .leaflet-popup-tip { background: #141b33; color: var(--text); border: 1px solid var(--line); }
+  .mapmenu-popup .leaflet-popup-content { margin: 10px; }
+  .mapmenu { display: flex; flex-direction: column; gap: 6px; } .mapmenu button { white-space: nowrap; }
   @media (max-width: 800px) { main { flex-direction: column; } #map { flex: none; height: 55vh; min-height: 260px; } aside { width: auto; border-left: 0; border-top: 1px solid var(--line); } #speed { font-size: 56px; } }
 </style>
 </head>
@@ -76,7 +96,7 @@
     <div id="speed">--<small>km/h</small></div>
     <div id="clock">--</div>
     <div class="gbar"><i id="gbar"></i></div>
-    <canvas id="ball" title="G ボール(円は 0.5G ごと、赤い円が 1G。上 = 加速)"></canvas>
+    <canvas id="ball" title="G ボール(体が感じる G。外周が 2G、薄い赤の円が 1G。上 = 減速、右 = 左コーナー)"></canvas>
     <dl>
       <dt>基準ラップとの差</dt><dd id="delta">--</dd>
       <dt>走行距離</dt><dd id="dist">--</dd>
@@ -89,30 +109,46 @@
       <dt>高度</dt><dd id="alt">--</dd>
       <dt>GPS</dt><dd id="gps">--</dd>
       <dt>水平精度</dt><dd id="hacc">--</dd>
-      <dt>ヨーレート</dt><dd id="yaw">--</dd>
+      <dt title="ジャイロの積分を、まっすぐ走っている区間の進行方向に合わせて補正した値。地図のオレンジの箱と黄色の線">車体の向き</dt><dd id="body">--</dd>
+      <dt title="車体の向き − 進行方向(地図の緑の線)。コーナー中は、車体がコーナーの内側 / 外側どちらを向いているかも出します">スリップアングル</dt><dd id="slip">--</dd>
+      <dt title="車体の向きの変化(バイアス補正済み)。右回り +">ヨーレート</dt><dd id="yaw">--</dd>
+      <dt title="GPS の進行方向の変化。右回り +。ヨーレートがこれより大きい = 車体が道筋より速く回っている">進行方向の変化</dt><dd id="crate">--</dd>
       <dt>バッテリー</dt><dd id="batt">--</dd>
     </dl>
-    <h3>ラップ <small id="lapsum">--</small></h3>
-    <div class="hint">クリック(Enter) = 比較に選ぶ / もう一度 = 非表示 / ダブルクリック(Shift+Enter) = 頭出し。細い線は現在のラップ(赤 = 加速、白 = 加減速なし、青 = 減速)、縁取りのある線は比較ラップ(緑 = 加速、黄 = 減速)。下のグラフに比較ラップとの差(Δ)が出ます</div>
-    <div id="laps"></div>
     <div class="legend" id="legend"><span>0</span><i></i><span id="vmax">-- km/h</span></div>
     <p style="margin-top:16px"><label><input type="checkbox" id="follow" checked> 現在地を追う</label><br>
     <button id="fit" style="margin-top:6px">全体を表示</button></p>
   </aside>
 </main>
+<section id="lappanel">
+  <div id="lpresize" title="ドラッグでラップ表の高さを変える(ダブルクリックで元に戻す)"></div>
+  <div class="lphead">
+    <h3>ラップ</h3><span id="lapsum">--</span>
+    <span class="hint" title="細い線は現在のラップ(赤 = 加速、白 = 加減速なし、青 = 減速)、縁取りのある線は比較ラップ(緑 = 加速、黄 = 減速)。下のグラフに比較ラップとの差(Δ)が出ます">行をクリック(Enter) = 比較に選ぶ / もう一度 = 非表示 / ダブルクリック(Shift+Enter) = 頭出し。地図で軌跡の上を長押し(右クリック) = 計測ライン・セクターの区切りを置く</span>
+  </div>
+  <div id="lapshead"></div>
+  <div id="laps"></div>
+</section>
 <footer>
   <div id="transport">
-    <button id="play" title="スペース">▶</button>
-    <select id="rate"><option>1</option><option>2</option><option>5</option><option>10</option><option>30</option></select><label>倍速</label>
+    <button id="lprev" title="前のラップの頭へ(今のラップの途中なら、そのラップの頭へ)([ キー)">⏮</button>
+    <button id="fprev" title="1 コマ戻る(, キー)">◀❙</button>
+    <button id="rev" title="逆再生">◀</button>
+    <button id="play" title="再生(スペース)">▶</button>
+    <button id="fnext" title="1 コマ進む(. キー)">❙▶</button>
+    <button id="lnext" title="次のラップの頭へ(] キー)">⏭</button>
+    <select id="rate"><option>0.2</option><option>0.5</option><option selected>1</option><option>2</option><option>5</option><option>10</option><option>30</option></select><label>倍速</label>
     <input type="range" id="seek" min="0" max="0" step="0.04" value="0">
     <span id="pos">0:00 / 0:00</span>
     <button id="zout" title="グラフを縮小(ホイールでも可)">−</button><button id="zin" title="グラフを拡大(ホイール / ピンチでも可。Shift+ホイールで左右移動)">＋</button><button id="zall" title="グラフを全体表示">全体</button>
   </div>
-  <canvas id="chart"></canvas>
+  <canvas id="chart" title="クリック / ドラッグ = シーク、右ドラッグ = 左右に移動、ホイール = 拡大 / 縮小"></canvas>
+  <div id="cscroll"><i id="cthumb"></i></div>
 </footer>
 <div id="drop">CSV をドロップ</div>
 <script src="/vendor/leaflet/leaflet.js"></script>
 <script src="/lap.js"></script>
+<script src="/heading.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>
