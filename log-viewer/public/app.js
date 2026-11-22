@@ -935,11 +935,24 @@ function lapMenu(latlng) {
   add('ここを計測ラインにする', () => setManualGate(latlng));
   if (savedGate(D.name)) add('計測ラインを自動検出に戻す', () => setManualGate(null));
   add('ここにセクターの区切りを置く', () => addSector(latlng));
-  // 近くにある区切りは消せる(画面上で 30 px 以内)
+  // 近くにある区切りは消せる(画面上で 30 px 以内の、地図に出ている区切りのうち最も近いもの)。
+  // 保存の並びで最初に当たったものを消すと、隣の区切りや、地図に出ていない区切り(ラップの中で通っていないもの)が消える
   const marks = savedSectors(D.name);
   const pt = map.latLngToContainerPoint(latlng);
-  const near = marks.findIndex((m) => map.latLngToContainerPoint([m.lat, m.lon]).distanceTo(pt) < 30);
-  if (near >= 0) add('このセクターの区切りを消す', () => { marks.splice(near, 1); storeSectors(D.name, marks); computeSectors(D); applyLapChange(); });
+  let near = null, nearPx = 30;
+  for (const m of D.sectors ? D.sectors.marks : []) {
+    const px = map.latLngToContainerPoint([m.lat, m.lon]).distanceTo(pt);
+    if (px < nearPx) { near = m; nearPx = px; }
+  }
+  if (near) {
+    add('このセクターの区切りを消す', () => {
+      // 保存済みのうち、その区切りから 10 m 以内のもの(以前の版で重ねて置けた分)も一緒に消す。
+      // 地図に出ている区切り同士は 10 m 以上離れているので、ほかの区切りは消えない
+      storeSectors(D.name, marks.filter((m) => haversine(m.lat, m.lon, near.lat, near.lon) >= SECTOR_MIN_DIST));
+      computeSectors(D);
+      applyLapChange();
+    });
+  }
   if (marks.length) add('セクターの区切りをすべて消す', () => { storeSectors(D.name, []); computeSectors(D); applyLapChange(); });
   // 長押しを離したときのクリックで閉じないよう、地図のクリックでは閉じない(× か別の場所の長押しで閉じる)
   L.popup({ closeOnClick: false, autoClose: true, className: 'mapmenu-popup' }).setLatLng(latlng).setContent(box).openOn(map);
@@ -1374,7 +1387,8 @@ cv.addEventListener('pointermove', (e) => {
     panning.x = e.clientX;
   } else if (dragging) seekFromEvent(e);
 });
-cv.addEventListener('pointerup', () => { dragging = false; panning = null; });
+// 操作が中断されたとき(pointercancel)も終わらせる。残すと、ボタンを押していないのにシークや移動が続く
+for (const t of ['pointerup', 'pointercancel']) cv.addEventListener(t, () => { dragging = false; panning = null; });
 cv.addEventListener('contextmenu', (e) => e.preventDefault());
 
 // スクロールバー: つまみ = グラフに見えている範囲。つまみのドラッグで移動、溝のクリックで 1 画面ずつ移動
@@ -1398,7 +1412,7 @@ sthumb.addEventListener('pointermove', (e) => {
   panChart((e.clientX - thumbDrag.x) / sbar.clientWidth * (V.t1 - V.t0));
   thumbDrag.x = e.clientX;
 });
-sthumb.addEventListener('pointerup', () => { thumbDrag = null; });
+for (const t of ['pointerup', 'pointercancel']) sthumb.addEventListener(t, () => { thumbDrag = null; });
 sbar.addEventListener('pointerdown', (e) => {
   if (!D || !CZ || e.target !== sbar) return;
   const R = chartRange(), r = sthumb.getBoundingClientRect();
@@ -1454,9 +1468,11 @@ $('rev').onclick = () => setPlaying(!(playing && playDir < 0), -1);
 function stepFrame(dir) {
   if (!D) return;
   setPlaying(false);
-  const i = Math.max(0, upperBound(D.t, T) - 1);
-  if (dir > 0) setTime(D.t[Math.min(D.n - 1, i + 1)]);
-  else setTime(T > D.t[i] + 1e-6 ? D.t[i] : D.t[Math.max(0, i - 1)]);
+  // 今の時刻から EPS より離れた、いちばん近い行へ。EPS 以内の行は「今いる行」とみなす
+  // (シークバーの刻みで行の時刻からわずかにずれていても 1 回で動く。同じ時刻の行が続いても止まらない)
+  const EPS = 1e-6;
+  if (dir > 0) { const j = upperBound(D.t, T + EPS); if (j < D.n) setTime(D.t[j]); }
+  else { const j = upperBound(D.t, T - EPS) - 1; if (j >= 0) setTime(D.t[j]); } // j = T - EPS 以下で最後の行
 }
 // ラップ送り: 次のラップの頭へ / 今のラップの頭へ(頭から 1 秒以内なら前のラップの頭へ)。再生中なら再生を続ける
 function stepLap(dir) {
@@ -1484,6 +1500,7 @@ $('seek').oninput = (e) => setTime(+e.target.value);
 $('fit').onclick = () => D && fitTrack();
 document.addEventListener('keydown', (e) => {
   if (e.target.tagName === 'SELECT' || e.target.tagName === 'INPUT' && e.target.type !== 'range' && e.target.type !== 'checkbox') return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return; // ブラウザや OS のショートカット(Cmd+[ = 戻る など)と一緒には動かさない
   if (e.code === 'Space') { e.preventDefault(); setPlaying(!playing, 1); } // 逆再生のあとでも、再生は順方向
   else if (e.code === 'Comma') stepFrame(-1);
   else if (e.code === 'Period') stepFrame(1);
